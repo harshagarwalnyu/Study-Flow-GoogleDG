@@ -270,6 +270,8 @@ export function Quiz() {
       const correctAnswer = typeof data.correctAnswer === "number" ? data.correctAnswer : null;
 
       setResult({ isCorrect, correctAnswer });
+      // The answer rescheduled this concept; update the toolbar's due-review count.
+      chrome.runtime.sendMessage({ type: "REFRESH_DRILL_BADGE" }).catch(() => {});
       setScore((prev) => ({
         correct: prev.correct + (isCorrect ? 1 : 0),
         total: prev.total + 1,

@@ -156,4 +156,12 @@ describe("auth session persistence", () => {
     await persistFirebaseIdToken(sessionStorage, null);
     expect(sessionStorage.state[STORAGE_KEYS.firebaseIdToken]).toBeUndefined();
   });
+
+  it("refreshes the drill badge on request, and tolerates a missing refresher", async () => {
+    const refreshDrillBadge = mock(async () => 3);
+    const base = { localStorage: createStorage(), sessionStorage: createStorage(), sidePanel: { open: () => undefined } };
+    await expect(handleExtensionMessage({ type: "REFRESH_DRILL_BADGE" }, {}, { ...base, refreshDrillBadge })).resolves.toEqual({ ok: true });
+    expect(refreshDrillBadge).toHaveBeenCalledTimes(1);
+    await expect(handleExtensionMessage({ type: "REFRESH_DRILL_BADGE" }, {}, base)).resolves.toEqual({ ok: true });
+  });
 });

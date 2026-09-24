@@ -25,7 +25,8 @@ export type ExtensionRuntimeMessage =
   | { type: "OPEN_ASK"; payload?: OpenAskPayload }
   | { type: "OPEN_ASK_SCREENSHOT"; payload?: OpenAskPayload }
   | { type: "OPEN_QUIZ" }
-  | { type: "OPEN_QUIZ_SCREENSHOT" };
+  | { type: "OPEN_QUIZ_SCREENSHOT" }
+  | { type: "REFRESH_DRILL_BADGE" };
 
 export interface ExtensionRuntimeResponse {
   ok: boolean;

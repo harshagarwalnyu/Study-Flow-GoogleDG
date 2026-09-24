@@ -26,6 +26,8 @@ export interface BackgroundRuntimeDeps {
   };
   fetchImpl?: typeof fetch;
   mode?: "development" | "production" | "test";
+  /** Re-check the drill queue and update the toolbar badge (see drill-nudge.ts). */
+  refreshDrillBadge?: () => Promise<unknown>;
 }
 
 export function buildIngestRequest(payload: IngestPagePayload): IngestTextRequest {
@@ -186,6 +188,9 @@ export async function handleExtensionMessage(
       await openSidePanelIfPossible(sender, deps.sidePanel);
       return { ok: true };
     }
+    case "REFRESH_DRILL_BADGE":
+      await deps.refreshDrillBadge?.();
+      return { ok: true };
     default: {
       const _exhaustive: never = message;
       return { ok: false, error: `Unknown message type: ${String((_exhaustive as ExtensionRuntimeMessage).type)}` };

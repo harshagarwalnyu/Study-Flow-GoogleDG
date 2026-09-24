@@ -6,13 +6,40 @@ import {
 } from "./lib/background-runtime";
 import { storageGet, storageSet } from "./lib/chrome-storage";
 import { STORAGE_KEYS, type ExtensionRuntimeMessage } from "./lib/messages";
+import { DRILL_NUDGE_ALARM, DRILL_NUDGE_PERIOD_MINUTES, refreshDrillBadge } from "./lib/drill-nudge";
+
+const mode = (import.meta.env.MODE as "development" | "production" | "test") || "development";
+
+function refreshBadge(): Promise<number> {
+  return refreshDrillBadge({
+    localStorage: chrome.storage.local,
+    sessionStorage: chrome.storage.session,
+    mode,
+    action: chrome.action,
+  });
+}
 
 const deps: BackgroundRuntimeDeps = {
   localStorage: chrome.storage.local,
   sessionStorage: chrome.storage.session,
   sidePanel: (chrome as any).sidePanel,
-  mode: (import.meta.env.MODE as "development" | "production" | "test") || "development",
+  mode,
+  refreshDrillBadge: refreshBadge,
 };
+
+// Drill nudge: re-check hourly (alarms survive service-worker shutdown; timers do not).
+function scheduleDrillNudge(): void {
+  void chrome.alarms.create(DRILL_NUDGE_ALARM, { periodInMinutes: DRILL_NUDGE_PERIOD_MINUTES, delayInMinutes: 1 });
+}
+
+chrome.alarms.onAlarm.addListener((alarm: chrome.alarms.Alarm) => {
+  if (alarm.name === DRILL_NUDGE_ALARM) void refreshBadge();
+});
+
+// Any sign-in or sign-out path writes the ID token to session storage.
+chrome.storage.onChanged.addListener((changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+  if (area === "session" && STORAGE_KEYS.firebaseIdToken in changes) void refreshBadge();
+});
 
 const SIDE_PANEL_PATH = "sidepanel.html";
 
@@ -29,10 +56,12 @@ function configureSidePanel(): void {
 
 chrome.runtime.onInstalled.addListener(() => {
   configureSidePanel();
+  scheduleDrillNudge();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   configureSidePanel();
+  scheduleDrillNudge();
 });
 
 configureSidePanel();
