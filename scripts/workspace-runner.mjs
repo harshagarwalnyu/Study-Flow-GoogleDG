@@ -31,7 +31,9 @@ const taskMatrix = {
     workspaces: workspaceRoots,
   },
   test: {
-    parallel: true,
+    // Sequential: five vitest pools (three of them jsdom) at once oversubscribe a laptop and
+    // turn into random 5s timeouts. Each suite still runs its own files in parallel.
+    parallel: false,
     workspaces: workspaceRoots,
   },
 };

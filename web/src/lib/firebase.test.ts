@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, vi, beforeAll, beforeEach, afterEach } from "vitest";
 
 const initializeApp = vi.fn(() => ({ name: "mock-app" }));
 const getApps = vi.fn(() => [] as unknown[]);
@@ -34,6 +34,13 @@ function stubMissingFirebaseConfigEnv() {
 }
 
 describe("lib/firebase", () => {
+  // The first import transforms @study-flow/client and @study-flow/shared from TS source, which
+  // can exceed the 5s test timeout on a loaded machine. Pay it once here; each test still
+  // re-evaluates the module after vi.resetModules().
+  beforeAll(async () => {
+    await import("./firebase");
+  }, 30_000);
+
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
