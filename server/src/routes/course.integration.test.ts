@@ -41,6 +41,7 @@ vi.mock("../services/cache", () => ({
 }));
 
 import { app } from "../app";
+import { cacheGet } from "../services/cache";
 
 describe("Course API Integration", () => {
   beforeEach(() => {
@@ -98,5 +99,23 @@ describe("Course API Integration", () => {
     mockDb.get.mockRejectedValueOnce(new Error("fail"));
     const res = await request(app).get("/api/v1/courses/c1");
     expect(res.status).toBe(500);
+  });
+
+  it("GET /api/v1/courses returns cached response if available", async () => {
+    vi.mocked(cacheGet).mockReturnValueOnce({ courses: [{ courseId: "c_cached", courseName: "Cached Math" }] });
+    const res = await request(app).get("/api/v1/courses");
+    expect(res.status).toBe(200);
+    expect(res.body.courses).toHaveLength(1);
+    expect(res.body.courses[0].courseId).toBe("c_cached");
+    expect(mockDb.get).not.toHaveBeenCalled();
+  });
+
+  it("GET /api/v1/courses/:courseId returns cached response if available", async () => {
+    vi.mocked(cacheGet).mockReturnValueOnce({ courseId: "c1", courseName: "Cached Detail" });
+    const res = await request(app).get("/api/v1/courses/c1");
+    expect(res.status).toBe(200);
+    expect(res.body.courseId).toBe("c1");
+    expect(res.body.courseName).toBe("Cached Detail");
+    expect(mockDb.get).not.toHaveBeenCalled();
   });
 });

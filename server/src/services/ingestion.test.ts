@@ -120,6 +120,19 @@ describe("ingestion service", () => {
         });
       });
       expect(mockDb.set).toHaveBeenCalledTimes(1); // course doc
+      expect(mockDb.set).toHaveBeenCalledWith(
+        expect.objectContaining({ platform: "content-script" }),
+        { merge: true },
+      );
+    });
+
+    it("tags the course doc with the provided source platform instead of the default", async () => {
+      await ingestText("uid1", "course1", sections(1), { filename: "w1.pdf", source: "brightspace" });
+
+      expect(mockDb.set).toHaveBeenCalledWith(
+        expect.objectContaining({ platform: "brightspace" }),
+        { merge: true },
+      );
     });
 
     it("replaces chunks previously ingested from the same source", async () => {
@@ -146,6 +159,13 @@ describe("ingestion service", () => {
     it("commits in batches under the Firestore write limit", async () => {
       await ingestText("uid1", "course1", sections(401));
       expect(mockBatch.commit).toHaveBeenCalledTimes(2);
+    });
+
+    it("skips the trailing commit when the last write exactly fills a batch", async () => {
+      // Exactly WRITE_BATCH_LIMIT (400) chunks: the mid-loop flush already commits and resets
+      // the counter to 0, so the final `if (batchCount > 0)` must not commit again.
+      await ingestText("uid1", "course1", sections(400));
+      expect(mockBatch.commit).toHaveBeenCalledTimes(1);
     });
 
     it("returns 0 without embedding when there are no chunks", async () => {

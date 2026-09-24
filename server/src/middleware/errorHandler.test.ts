@@ -33,4 +33,19 @@ describe("errorHandler middleware", () => {
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: "Not found" }));
   });
+
+  it("handles errors with statusCode and without message, passing details", () => {
+    const err = { statusCode: 400, details: [{ field: "bad" }] } as any;
+    const req = { path: "/test", method: "POST" } as any;
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() } as any;
+    const next = vi.fn();
+
+    errorHandler(err, req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: "Internal server error",
+      details: [{ field: "bad" }]
+    }));
+  });
 });

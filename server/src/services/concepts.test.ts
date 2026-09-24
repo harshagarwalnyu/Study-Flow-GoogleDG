@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { existingIds, nearest, findNearestCalls, mockEmbedLabels } = vi.hoisted(() => ({
   existingIds: new Set<string>(),
   // docs findNearest returns: { id, model, distance }
-  nearest: [] as Array<{ id: string; model: string; distance: number }>,
+  nearest: [] as Array<{ id: string; model: string; distance: number; hideDistance?: boolean }>,
   findNearestCalls: [] as any[],
   mockEmbedLabels: vi.fn(),
 }));
@@ -19,7 +19,11 @@ vi.mock("../db/firebase", () => {
             .filter((n) => n.distance <= opts.distanceThreshold)
             .map((n) => ({
               id: n.id,
-              get: (f: string) => (f === "labelEmbeddingModel" ? n.model : f === "_distance" ? n.distance : undefined),
+              get: (f: string) => {
+                if (f === "labelEmbeddingModel") return n.model;
+                if (f === "_distance") return n.hideDistance ? undefined : n.distance;
+                return undefined;
+              },
             })),
         }),
       };
@@ -60,6 +64,12 @@ describe("concepts", () => {
       expect(toSnakeCase("a".repeat(500))).toHaveLength(120);
     });
 
+    it("passes through a valid errorType and confidence unchanged", () => {
+      expect(normalizeClassifierTag({ conceptNode: "Limits", errorType: "procedural_error", confidence: 0.7 }, "x")).toEqual({
+        conceptNode: "limits", errorType: "procedural_error", confidence: 0.7,
+      });
+    });
+
     it("normalizes malformed classifier output", () => {
       expect(normalizeClassifierTag({ conceptNode: "Limits", errorType: "bogus", confidence: 7 }, "x")).toEqual({
         conceptNode: "limits", errorType: "knowledge_gap", confidence: 1,
@@ -97,6 +107,12 @@ describe("concepts", () => {
     it("ignores matches whose label vector came from another model", async () => {
       nearest.push({ id: "chain_rule", model: "text-embedding-004", distance: 0.01 });
       expect((await resolveConceptNode("u1", "chain_rule_2")).matchedExisting).toBe(false);
+    });
+
+    it("defaults the reported match distance to null when Firestore omits it", async () => {
+      nearest.push({ id: "chain_rule", model: "gemini-embedding-2", distance: 0.05, hideDistance: true });
+      const res = await resolveConceptNode("u1", "derivatives_chain_rule");
+      expect(res).toMatchObject({ conceptNode: "chain_rule", matchedExisting: true, distance: null, labelEmbedding: null });
     });
   });
 

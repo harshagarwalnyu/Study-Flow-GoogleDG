@@ -105,6 +105,18 @@ describe("gemini prompts", () => {
       expect(p).toContain("Common error types: procedural_error");
     });
 
+    it("hints with an empty concept name when smgData has no conceptNode", async () => {
+      await generateQuiz("chain_rule", [], { errorTypeMap: { procedural_error: 1 } });
+      const p = promptOf(mockGenerateJson);
+      expect(p).toContain("Student weak concept hint: . Common error types: procedural_error");
+    });
+
+    it("hints with no error types when smgData has no errorTypeMap", async () => {
+      await generateQuiz("chain_rule", [], { conceptNode: "chain_rule" });
+      const p = promptOf(mockGenerateJson);
+      expect(p).toContain("Student weak concept hint: chain_rule. Common error types: ");
+    });
+
     it("defaults sensibly", async () => {
       await generateQuiz("");
       const p = promptOf(mockGenerateJson);

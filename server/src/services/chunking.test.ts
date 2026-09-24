@@ -81,6 +81,36 @@ describe("chunkText", () => {
     expect(chunks.join("")).toBe("x".repeat(4000));
   });
 
+  it("computes a structural heading's level from scratch when there is no markdown ancestor", () => {
+    // No markdown headings anywhere, so the nesting stack is empty when "Theorem 1" is
+    // seen: level falls back to (stack.filter(markdown).at(-1)?.level ?? 0) + 1 = 1.
+    const text = "Theorem 1\nSome content.\n\nExample 2\nMore content.";
+    expect(chunkText(text)).toEqual([
+      "Theorem 1\nSome content.",
+      "Example 2\nMore content.",
+    ]);
+  });
+
+  it("falls back to hard-cutting when a long paragraph has no sentence-ending punctuation", () => {
+    // Pure periods: the sentence-boundary regex needs at least one non-terminator character
+    // per match, so it finds nothing and splitLong falls back to treating it as one sentence.
+    const text = ".".repeat(2000);
+    const chunks = chunkText(text);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    expect(chunks.every((c) => c.length <= MAX_CHUNK_CHARS)).toBe(true);
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("flushes an accumulated short sentence before hard-cutting a subsequent unbroken run", () => {
+    const text = "Short lead-in sentence here. " + "y".repeat(2000);
+    const chunks = chunkText(text);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    expect(chunks.every((c) => c.length <= MAX_CHUNK_CHARS)).toBe(true);
+    expect(chunks.some((c) => c.includes("Short lead-in sentence here."))).toBe(true);
+    const yCount = chunks.join("").split("").filter((c) => c === "y").length;
+    expect(yCount).toBe(2000);
+  });
+
   it("preserves every word of the source", () => {
     const text = "# T\n\n" + Array.from({ length: 30 }, (_, i) => words(15, `p${i}w`)).join("\n\n");
     const out = chunkText(text).join(" ");

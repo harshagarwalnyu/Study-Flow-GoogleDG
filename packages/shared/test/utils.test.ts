@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseClientEnvironment,
   parseExtensionEnvironment,
@@ -59,6 +59,18 @@ describe("shared utilities and environment", () => {
       expect(isSafeApiUrl(undefined, true)).toBe(false);
       expect(isSafeApiUrl("not-a-url")).toBe(false);
       expect(isSafeApiUrl("ftp://localhost")).toBe(false);
+    });
+
+    it("reports non-Error URL parse failures in the message", () => {
+      const RealURL = globalThis.URL;
+      vi.stubGlobal("URL", function () {
+        throw "boom";
+      });
+      try {
+        expect(() => normalizeApiUrl("http://localhost:3000")).toThrow("Invalid API URL: http://localhost:3000 - boom");
+      } finally {
+        vi.stubGlobal("URL", RealURL);
+      }
     });
   });
 });

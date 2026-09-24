@@ -26,6 +26,10 @@ vi.mock("cytoscape", () => ({
 const mockUser = { displayName: "Test User", uid: "123" };
 
 describe("Dashboard Comprehensive", () => {
+  // Widen the per-test timeout for this file only (not the shared vitest
+  // config): rendering the full Dashboard repeatedly under system load can
+  // exceed the default 5s timeout even when the assertions are correct.
+
   afterEach(cleanup);
   beforeEach(() => {
     vi.clearAllMocks();

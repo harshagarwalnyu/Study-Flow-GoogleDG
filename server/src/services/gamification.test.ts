@@ -73,6 +73,33 @@ describe('gamification service', () => {
       expect(data.achievements.find(a => a.id === 'first_quiz')?.unlocked).toBe(true);
     });
 
+    it('defaults streak to 0 when the stored streak field is missing on an active day', async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      mockDb.get.mockResolvedValue({
+        exists: true,
+        data: () => ({ xp: 0, lastActivityDate: today, unlockedAchievements: [] }),
+      });
+
+      const data = await getGamificationData('user1');
+      expect(data.streak).toBe(0);
+    });
+
+    it('reports unlockedAt as null for a previously-unlocked achievement missing from achievementDates', async () => {
+      mockDb.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          xp: 0,
+          // Already unlocked in a prior request, but the dates map is missing this entry
+          // (e.g. legacy data) — no achievements are newly unlocked this call.
+          unlockedAchievements: ['first_quiz'],
+        }),
+      });
+
+      const data = await getGamificationData('user1');
+      expect(data.achievements.find((a) => a.id === 'first_quiz')).toMatchObject({ unlocked: true, unlockedAt: null });
+      expect(mockDb.set).not.toHaveBeenCalled();
+    });
+
     it('unlocks new achievements', async () => {
       mockDb.get.mockResolvedValue({
         exists: true,
@@ -93,6 +120,13 @@ describe('gamification service', () => {
 
     it('handles errors gracefully', async () => {
       mockDb.get.mockRejectedValue(new Error('Firestore down'));
+      const data = await getGamificationData('user1');
+      expect(data.xp).toBe(0);
+      expect(data.level).toBe(1);
+    });
+
+    it('handles a non-Error rejection gracefully too', async () => {
+      mockDb.get.mockRejectedValue('firestore string rejection');
       const data = await getGamificationData('user1');
       expect(data.xp).toBe(0);
       expect(data.level).toBe(1);
@@ -144,8 +178,20 @@ describe('gamification service', () => {
       expect(written()).toEqual({ lastActivity: now.toISOString() });
     });
 
+    it('defaults the continued streak to 1 when the prior streak field is missing', async () => {
+      const yesterday = '2026-09-23';
+      stats({ lastActivityDate: yesterday }); // no `streak` field at all
+      await recordActivity('u1', {}, now);
+      expect(written()).toMatchObject({ streak: 1 });
+    });
+
     it('never throws: gamification must not fail a study request', async () => {
       mockDb.runTransaction.mockRejectedValueOnce(new Error('contention'));
+      await expect(recordActivity('u1', { xp: 5 }, now)).resolves.toBeUndefined();
+    });
+
+    it('never throws for a non-Error rejection either', async () => {
+      mockDb.runTransaction.mockRejectedValueOnce('string rejection, not an Error instance');
       await expect(recordActivity('u1', { xp: 5 }, now)).resolves.toBeUndefined();
     });
   });

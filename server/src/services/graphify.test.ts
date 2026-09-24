@@ -103,11 +103,31 @@ describe("graphifyPromptPart", () => {
     expect(result.includes("chain rule")).toBe(true);
   });
 
-  it("triggers safety slice in final join", () => {
-    // This is hard to trigger but let's try a case where usedChars calculation might be slightly off
-    // or join adds something unexpected.
-    const text = "A".repeat(10) + " " + "B".repeat(10);
-    const result = graphifyPromptPart(text, { maxTokens: 4 }); // 16 chars
-    expect(result.length).toBeLessThanOrEqual(16);
+  it("never exceeds the character budget, whatever the budget", () => {
+    const text = [
+      "Chain rule differentiates composed functions.",
+      "Product rule handles products of functions.",
+      "Integration by parts reverses the product rule.",
+      "Limits describe behaviour near a point.",
+    ].join("\n\n");
+    for (let maxTokens = 1; maxTokens <= 60; maxTokens++) {
+      expect(graphifyPromptPart(text, { maxTokens, anchorText: "product rule" }).length).toBeLessThanOrEqual(maxTokens * 4);
+    }
+  });
+
+  it("returns nothing when no token budget is given", () => {
+    expect(graphifyPromptPart("Chain rule differentiates composed functions.")).toBe("");
+  });
+
+  it("falls back to a plain slice for text with no sentence content", () => {
+    expect(graphifyPromptPart("!".repeat(100), { maxTokens: 10 })).toBe("!".repeat(40));
+  });
+
+  it("keeps units made only of stop words, ranked below units with real terms", () => {
+    const text = "Is it. Chain rule works well. So be it. Integration by parts integrates products of functions.";
+    // 40 chars: the content unit plus the first filler fits; the long unit does not.
+    expect(graphifyPromptPart(text, { maxTokens: 10 })).toBe("Is it.\n\nChain rule works well.");
+    // 48 chars: a second token-less unit is compared with the first (both empty) and still fits.
+    expect(graphifyPromptPart(text, { maxTokens: 12 })).toBe("Is it.\n\nChain rule works well.\n\nSo be it.");
   });
 });

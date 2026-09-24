@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { getWeakestConcepts, getGraph, getDrillQueue } from "./misconception";
+import { getWeakestConcepts, getGraph, getDrillQueue, initializeConcepts, getStudentProfile } from "./misconception";
+import { resolveConceptNodes } from "./concepts";
 import { applyEvidence, newCard } from "./scheduler";
 
-const { mockDb, mockFieldValue } = vi.hoisted(() => {
+const { mockDb, mockFieldValue, mockBatch } = vi.hoisted(() => {
+  const mockBatch = { set: vi.fn(), commit: vi.fn().mockResolvedValue(undefined) };
   const mock = {
     collection: vi.fn(),
     doc: vi.fn(),
@@ -14,6 +16,7 @@ const { mockDb, mockFieldValue } = vi.hoisted(() => {
     orderBy: vi.fn(),
     limit: vi.fn(),
     runTransaction: vi.fn().mockReturnValue({ catch: vi.fn() }),
+    batch: vi.fn(() => mockBatch),
   };
 
   mock.collection.mockReturnValue(mock);
@@ -25,6 +28,7 @@ const { mockDb, mockFieldValue } = vi.hoisted(() => {
 
   return {
     mockDb: mock,
+    mockBatch,
     mockFieldValue: {
       serverTimestamp: vi.fn(() => "mock-ts"),
       increment: vi.fn((n) => ({ type: "increment", value: n })),
@@ -107,6 +111,87 @@ describe("misconception service", () => {
       expect(result[0].retrievability).toBeLessThan(0.9);
       expect(result[1]).toMatchObject({ due: false });
       expect(result[1]).not.toHaveProperty("retrievability");
+    });
+
+    it("defaults nextReviewDate to now when the stored node has none at all", async () => {
+      const before = Date.now();
+      mockDb.get.mockResolvedValue({
+        docs: [{ id: "no_date", data: () => ({ fsrs: newCard(new Date()), isInitializedOnly: true }) }],
+      });
+
+      const result = await getDrillQueue("uid1");
+      expect(result[0].nextReviewDate.getTime()).toBeGreaterThanOrEqual(before);
+    });
+  });
+
+  describe("initializeConcepts", () => {
+    it("does nothing for an empty concept list", async () => {
+      await initializeConcepts("u1", [], "c1");
+      expect(mockDb.batch).not.toHaveBeenCalled();
+      expect(mockBatch.commit).not.toHaveBeenCalled();
+    });
+
+    it("skips concepts that resolved onto an existing node", async () => {
+      vi.mocked(resolveConceptNodes).mockResolvedValueOnce([
+        { conceptNode: "chain_rule", matchedExisting: true, distance: 0, labelEmbedding: null },
+      ]);
+
+      await initializeConcepts("u1", ["Chain Rule"], "c1");
+
+      expect(mockBatch.set).not.toHaveBeenCalled();
+      expect(mockBatch.commit).not.toHaveBeenCalled();
+    });
+
+    it("batches new, deduplicated concepts and commits once", async () => {
+      vi.mocked(resolveConceptNodes).mockResolvedValueOnce([
+        { conceptNode: "limits", matchedExisting: false, distance: null, labelEmbedding: [0.1] },
+        { conceptNode: "limits", matchedExisting: false, distance: null, labelEmbedding: [0.1] }, // duplicate label
+        { conceptNode: "series", matchedExisting: true, distance: 0, labelEmbedding: null }, // already exists
+      ]);
+
+      await initializeConcepts("u1", ["limits", "Limits", "series"], "c1");
+
+      expect(mockBatch.set).toHaveBeenCalledTimes(1);
+      const [, payload] = mockBatch.set.mock.calls[0];
+      expect(payload).toMatchObject({ courseId: "c1", accuracyRate: 1.0, isInitializedOnly: true });
+      expect(mockBatch.commit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("getStudentProfile", () => {
+    it("returns null when the student has no weak concepts yet", async () => {
+      mockDb.get.mockResolvedValueOnce({ empty: true }); // due-for-review query
+      mockDb.get.mockResolvedValueOnce({ docs: [] }); // fallback query, also empty
+
+      expect(await getStudentProfile("u1")).toBeNull();
+    });
+
+    it("aggregates error-type counts across the student's weakest concepts", async () => {
+      mockDb.get.mockResolvedValueOnce({
+        empty: false,
+        docs: [
+          { id: "chain_rule", data: () => ({ errorTypeMap: { procedural_error: 2 } }) },
+          { id: "limits", data: () => ({ errorTypeMap: { procedural_error: 1, knowledge_gap: 1 } }) },
+        ],
+      });
+
+      const profile = await getStudentProfile("u1");
+
+      expect(profile).toEqual({
+        weakConcepts: ["chain_rule", "limits"],
+        errorTypeMap: { procedural_error: 3, knowledge_gap: 1 },
+      });
+    });
+
+    it("tolerates a weakest concept with no errorTypeMap field at all", async () => {
+      mockDb.get.mockResolvedValueOnce({
+        empty: false,
+        docs: [{ id: "fresh_from_ingestion", data: () => ({}) }],
+      });
+
+      const profile = await getStudentProfile("u1");
+
+      expect(profile).toEqual({ weakConcepts: ["fresh_from_ingestion"], errorTypeMap: {} });
     });
   });
 });

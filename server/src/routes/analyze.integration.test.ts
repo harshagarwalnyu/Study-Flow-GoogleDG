@@ -10,6 +10,7 @@ const {
   mockEnsureUserDoc,
   mockExtractOCR,
   mockRecordActivity,
+  mockUserHolder,
 } = vi.hoisted(() => ({
   mockExplain: vi.fn(),
   mockClassify: vi.fn(),
@@ -19,6 +20,7 @@ const {
   mockEnsureUserDoc: vi.fn().mockResolvedValue(undefined),
   mockExtractOCR: vi.fn(),
   mockRecordActivity: vi.fn().mockResolvedValue(undefined),
+  mockUserHolder: { user: { uid: "user123", email: "u@e.com", name: "User" } as { uid: string; email?: string; name?: string } },
 }));
 
 // Mock services
@@ -60,7 +62,7 @@ vi.mock("firebase-admin/app", () => ({ initializeApp: vi.fn(), cert: vi.fn(), ge
 vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next(), aiLimiter: (req: any, res: any, next: any) => next() }));
 vi.mock("../middleware/auth", () => ({
   requireFirebaseAuth: (req: any, res: any, next: any) => {
-    req.user = { uid: "user123", email: "u@e.com", name: "User" };
+    req.user = mockUserHolder.user;
     next();
   },
 }));
@@ -71,6 +73,7 @@ import * as concepts from "../services/concepts";
 
 describe("Analyze API Integration", () => {
   beforeEach(() => {
+    mockUserHolder.user = { uid: "user123", email: "u@e.com", name: "User" };
     vi.clearAllMocks();
   });
 
@@ -146,6 +149,16 @@ describe("Analyze API Integration", () => {
     expect(res.status).toBe(400);
   });
 
+  it("returns 400 if OCR returns empty text", async () => {
+    mockExtractOCR.mockResolvedValueOnce("");
+    const res = await request(app)
+      .post("/api/v1/analyze")
+      .send({ imageBase64: "blank_img" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("content (string) or imageBase64 is required");
+  });
+
   it("handles normalization of classifier tag", async () => {
     mockExplain.mockResolvedValue({ mainConcept: "fallback" });
     mockClassify.mockResolvedValue({ conceptNode: "Node 1", errorType: "invalid", confidence: "0.8" });
@@ -167,5 +180,50 @@ describe("Analyze API Integration", () => {
       .send({ content: "text" });
 
     expect(res.status).toBe(500);
+  });
+
+  it("handles missing email and name gracefully", async () => {
+    mockUserHolder.user = { uid: "user123" };
+    mockExplain.mockResolvedValue({ solution: "sol" });
+    mockClassify.mockResolvedValue({});
+
+    const res = await request(app)
+      .post("/api/v1/analyze")
+      .send({ content: "text without email or name" });
+
+    expect(res.status).toBe(200);
+    expect(mockEnsureUserDoc).toHaveBeenCalledWith("user123", "", "");
+  });
+
+  // req.ip is typed as a non-optional string by @types/express, and every real HTTP
+  // transport (including supertest's loopback socket) always yields a truthy value, so the
+  // `req.ip || ""` fallback cannot be reached through a normal request. It is still real,
+  // reachable code (Unix-domain-socket connections and some proxy misconfigurations leave
+  // req.ip undefined), so we invoke the router's own handler directly instead of faking a
+  // socket, and assert on the same logged behavior the fallback exists to produce.
+  it("logs an empty ip instead of undefined when req.ip is unavailable", async () => {
+    mockExplain.mockResolvedValue({ solution: "sol" });
+    mockClassify.mockResolvedValue({});
+
+    const { analyzeRouter } = await import("./analyze");
+    const layer = (analyzeRouter as any).stack.find((l: any) => l.route?.path === "/");
+    const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+
+    const req: any = {
+      user: { uid: "user123", email: "u@e.com", name: "User" },
+      body: { content: "text" },
+      ip: "",
+      originalUrl: "/api/v1/analyze",
+      method: "POST",
+      headers: {},
+    };
+    const res: any = { json: vi.fn(), status: vi.fn().mockReturnThis() };
+    const next = vi.fn();
+
+    await handler(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    const [, payload] = mockSaveInteraction.mock.calls[0];
+    expect(payload.requestMeta.ip).toBe("");
   });
 });

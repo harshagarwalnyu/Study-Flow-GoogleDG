@@ -58,11 +58,29 @@ describe("thresholdSweep / pickThreshold", () => {
   });
 
   it("falls back to best F1 when no threshold is precise enough", () => {
-    const noisy = [
-      { a: "a", b: "b", same: true, distance: 0.3 },
-      { a: "c", b: "d", same: false, distance: 0.1 },
+    // Test fallback with points where F1 increases then decreases to hit both ternary branches
+    const fallbackPoints = [
+      { threshold: 0.1, precision: 0.5, recall: 0.5, f1: 0.5 },
+      { threshold: 0.2, precision: 0.8, recall: 0.8, f1: 0.8 },
+      { threshold: 0.3, precision: 0.2, recall: 0.2, f1: 0.2 },
     ];
-    expect(pickThreshold(thresholdSweep(noisy, [0.2, 0.4]))?.threshold).toBe(0.4);
+    expect(pickThreshold(fallbackPoints, 0.95)?.threshold).toBe(0.2);
     expect(pickThreshold([])).toBeNull();
+  });
+
+  it("handles case with zero positive pairs in thresholdSweep", () => {
+    const allNeg = [
+      { a: "x", b: "y", same: false, distance: 0.1 },
+    ];
+    const [res] = thresholdSweep(allNeg, [0.2]);
+    expect(res.recall).toBe(0);
+  });
+
+  it("favors lower threshold when recall is tied in safe points", () => {
+    const points = [
+      { threshold: 0.2, precision: 0.98, recall: 0.8, f1: 0.88 },
+      { threshold: 0.1, precision: 0.98, recall: 0.8, f1: 0.88 },
+    ];
+    expect(pickThreshold(points, 0.95)?.threshold).toBe(0.1);
   });
 });

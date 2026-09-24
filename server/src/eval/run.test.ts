@@ -67,4 +67,44 @@ describe("eval runner", () => {
     const corpus = [{ title: "t", content: "alpha beta", vector: [] }];
     expect(missingMarkers(corpus, [{ id: "x", question: "q", relevant: ["alpha", "gamma"] }])).toEqual(['x: "gamma"']);
   });
+
+  it("handles custom corpus directory and edge cases in summarize/formatSummary", async () => {
+    const customDir = path.join(FIXTURES, "corpus");
+    const corpus = await loadCorpus(customDir);
+    expect(corpus.length).toBeGreaterThan(0);
+
+    // Cases with only on-topic (offTopic.length === 0) and all found (misses = 0)
+    const onTopicOnlyCases = [
+      { id: "q1", question: "limits", relevant: ["definition"] },
+    ];
+    const pairs = [
+      { a: "limits", b: "integrals", same: false },
+    ];
+
+    const rankedHit = [
+      { distance: 0.1, relevant: true },
+    ];
+    const mockRetrievalResults = [{ id: "q1", ranked: rankedHit }];
+
+    // conceptThreshold = 0.04 (already in default grid)
+    const summary = summarize(
+      mockRetrievalResults,
+      onTopicOnlyCases,
+      [{ a: "limits", b: "integrals", same: false, distance: 0.8 }],
+      0.6,
+      0.04,
+    );
+
+    expect(summary.misses).toEqual([]);
+    expect(summary.retrieval.offTopicPassing).toBe(0);
+
+    const formatted = formatSummary(summary);
+    expect(formatted).toContain("missed@5: none");
+
+    const formattedNoRec = formatSummary({
+      ...summary,
+      concepts: { ...summary.concepts, recommended: null },
+    });
+    expect(formattedNoRec).toContain("recommended: n/a");
+  });
 });

@@ -99,6 +99,18 @@ describe("Quiz API Integration", () => {
       expect(mockRetrieveChunks).toHaveBeenCalled();
     });
 
+    it("deletes expired quiz sessions in the background after generating", async () => {
+      const expired = { ref: { delete: vi.fn(async () => undefined) } };
+      mockDb.get.mockResolvedValue({ docs: [expired], exists: false, data: () => ({}) });
+      mockGenerateQuiz.mockResolvedValue({ questions: [{ question: "Q1", options: ["A", "B"], answer: 0 }] });
+
+      const res = await request(app).post("/api/v1/quiz").send({ topic: "math", courseId: "c1", count: 1 });
+
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => expect(expired.ref.delete).toHaveBeenCalledTimes(1));
+      expect(mockDb.where).toHaveBeenCalledWith("expiresAt", "<", expect.any(Number));
+    });
+
     it("picks weakest concepts if no topic provided", async () => {
       mockGetWeakest.mockResolvedValue([{ conceptNode: "weak1" }]);
       mockGenerateQuiz.mockResolvedValue({ questions: [] });
@@ -151,6 +163,17 @@ describe("Quiz API Integration", () => {
       expect(res.body.questions[0]).not.toHaveProperty("answer");
     });
 
+    it("handles a generator response with no questions field at all", async () => {
+      mockGenerateQuiz.mockResolvedValue({}); // no `questions` key — defends against a malformed model response
+
+      const res = await request(app).post("/api/v1/quiz").send({ topic: "math" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.questions).toEqual([]);
+      const [, savedInteraction] = mockSaveInteraction.mock.calls[0];
+      expect(savedInteraction.response.questionCount).toBe(0);
+    });
+
     it("fails instead of returning an ungradeable quiz when the session cannot be saved", async () => {
       mockGenerateQuiz.mockResolvedValue({ questions: [{ question: "Q1", options: ["A", "B"], answer: 0 }] });
       mockDb.set.mockImplementationOnce(() => Promise.reject(new Error("firestore down")));
@@ -194,6 +217,41 @@ describe("Quiz API Integration", () => {
 
       expect(res.body.isCorrect).toBe(false);
       expect(mockRecordActivity).toHaveBeenCalledWith("user123", {});
+    });
+
+    it("returns 400 if the submitted conceptNode does not match the stored question", async () => {
+      mockDb.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          questions: [{ conceptNode: "n1", answer: 0 }],
+          expiresAt: Date.now() + 100000,
+        }),
+      });
+
+      const res = await request(app)
+        .post("/api/v1/quiz/answer")
+        .send({ conceptNode: "spoofed_concept", selectedAnswer: 0, sessionId: "550e8400-e29b-41d4-a716-446655440000", questionIndex: 0 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("Invalid question reference.");
+      expect(mockRecordInteraction).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 if questionIndex has no stored question", async () => {
+      mockDb.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          questions: [{ conceptNode: "n1", answer: 0 }],
+          expiresAt: Date.now() + 100000,
+        }),
+      });
+
+      const res = await request(app)
+        .post("/api/v1/quiz/answer")
+        .send({ conceptNode: "n1", selectedAnswer: 0, sessionId: "550e8400-e29b-41d4-a716-446655440000", questionIndex: 5 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("Invalid question reference.");
     });
 
     it("returns 400 if session expired", async () => {

@@ -64,6 +64,13 @@ describe('ocr service', () => {
         image: { content: 'base64data' }
       });
     });
+
+    it('should return empty string when the image has no text annotations', async () => {
+      mockClient.textDetection.mockResolvedValue([{ textAnnotations: [] }]);
+      expect(await extractTextFromBase64('base64data')).toBe('');
+      mockClient.textDetection.mockResolvedValue([{}]);
+      expect(await extractTextFromBase64('base64data')).toBe('');
+    });
   });
 
   describe('extractTextFromPDF', () => {

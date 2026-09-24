@@ -84,6 +84,12 @@ describe("rag", () => {
     expect(record).toEqual({ content: "a", courseId: "calc", distance: 0.15, filename: "a.pdf", chunkIndex: 3 });
   });
 
+  it("reports distance 0 when the store returns no numeric distance", async () => {
+    courseChunks.calc = [chunk("a", 0.15, { _distance: undefined })];
+    const [record] = await retrieveChunkRecords("u1", "calc", "q");
+    expect(record.distance).toBe(0);
+  });
+
   it("drops chunks embedded by a different model and warns once", async () => {
     courseChunks.calc = [
       chunk("legacy", 0.01, { embeddingModel: "text-embedding-004" }),

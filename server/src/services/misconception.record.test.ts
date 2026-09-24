@@ -1,11 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // In-memory Firestore with real transaction semantics for the paths recordInteraction touches.
-const { store, statsWrites, mockEmbedLabels, txnCount } = vi.hoisted(() => ({
+const { store, statsWrites, mockEmbedLabels, txnCount, failStatsSet, failStatsTxnGet, mockLogger } = vi.hoisted(() => ({
   store: new Map<string, Record<string, any>>(),
   statsWrites: [] as any[],
   mockEmbedLabels: vi.fn(async (labels: string[]) => labels.map(() => [0.5])),
   txnCount: { n: 0 },
+  // Toggled by individual tests to exercise the best-effort gamification-sync catch handlers.
+  // `value` is thrown as-is when set, so a string exercises the non-Error side of
+  // `err instanceof Error ? err.message : err`.
+  failStatsSet: { value: undefined as undefined | Error | string },
+  failStatsTxnGet: { value: undefined as undefined | Error | string },
+  mockLogger: { warn: vi.fn(), info: vi.fn() },
 }));
 
 vi.mock("../db/firebase", () => {
@@ -13,7 +19,10 @@ vi.mock("../db/firebase", () => {
     path,
     get: async () => ({ exists: store.has(path), data: () => store.get(path) }),
     set: async (data: any, opts?: any) => {
-      if (path.endsWith("/gamification/stats")) statsWrites.push(data);
+      if (path.endsWith("/gamification/stats")) {
+        if (failStatsSet.value !== undefined) throw failStatsSet.value;
+        statsWrites.push(data);
+      }
       store.set(path, opts?.merge ? { ...(store.get(path) || {}), ...data } : data);
     },
   });
@@ -27,7 +36,12 @@ vi.mock("../db/firebase", () => {
       txnCount.n++;
       const writes: Array<() => void> = [];
       const txn = {
-        get: async (r: any) => ({ exists: store.has(r.path), data: () => store.get(r.path) }),
+        get: async (r: any) => {
+          if (r.path.endsWith("/gamification/stats") && failStatsTxnGet.value !== undefined) {
+            throw failStatsTxnGet.value;
+          }
+          return { exists: store.has(r.path), data: () => store.get(r.path) };
+        },
         set: (r: any, data: any, opts?: any) =>
           writes.push(() => {
             if (r.path.endsWith("/gamification/stats")) statsWrites.push(data);
@@ -49,7 +63,7 @@ vi.mock("firebase-admin/firestore", () => ({
     vector: (v: number[]) => ({ vector: v }),
   },
 }));
-vi.mock("../logger", () => ({ logger: { warn: vi.fn(), info: vi.fn() } }));
+vi.mock("../logger", () => ({ logger: mockLogger }));
 vi.mock("./embeddings", () => ({ embedLabels: mockEmbedLabels, currentEmbeddingModel: () => "gemini-embedding-2" }));
 vi.mock("./concepts", () => ({
   labelEmbeddingFields: (v: number[] | null) => (v ? { labelEmbedding: { vector: v }, labelEmbeddingModel: "gemini-embedding-2" } : {}),
@@ -66,6 +80,9 @@ describe("recordInteraction (FSRS)", () => {
     statsWrites.length = 0;
     txnCount.n = 0;
     mockEmbedLabels.mockClear();
+    failStatsSet.value = undefined;
+    failStatsTxnGet.value = undefined;
+    mockLogger.warn.mockClear();
   });
 
   it("creates a node with an FSRS card and a label vector on the first graded answer", async () => {
@@ -79,6 +96,21 @@ describe("recordInteraction (FSRS)", () => {
     expect(n.labelEmbedding).toEqual({ vector: [0.5] });
     expect(statsWrites[0]).toMatchObject({ conceptCount: { increment: 1 }, maxAccuracy: 1 });
     expect(txnCount.n).toBe(1);
+  });
+
+  it("creates a node from a wrong first answer: counts the miss and records its error type", async () => {
+    await recordInteraction("u1", "series", { errorType: "knowledge_gap", confidence: 1, isCorrect: false });
+
+    const n = node("series");
+    expect(n).toMatchObject({
+      accuracyRate: 0,
+      correctCount: 0,
+      incorrectCount: 1,
+      errorTypeMap: { knowledge_gap: 1 },
+      lastErrorAt: "TS",
+      courseId: null,
+    });
+    expect(n.fsrs.lapses + n.fsrs.reps).toBeGreaterThan(0);
   });
 
   it("uses the resolver's label vector instead of embedding again", async () => {
@@ -142,5 +174,108 @@ describe("recordInteraction (FSRS)", () => {
     await recordInteraction("u1", "a", { errorType: "none", confidence: 1 });
     await recordInteraction("u1", "a", { errorType: "none", confidence: 1 });
     expect(mockEmbedLabels).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs but does not throw when the gamification stat sync fails for a brand-new node", async () => {
+    failStatsSet.value = new Error("gamification stats write failed");
+    await expect(
+      recordInteraction("u1", "new_concept", { errorType: "none", confidence: 1, isCorrect: true }),
+    ).resolves.toBeUndefined();
+
+    // The SMG node itself was still written — only the best-effort stats sync failed.
+    expect(node("new_concept")).toMatchObject({ correctCount: 1 });
+    await vi.waitFor(() =>
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ uid: "u1", conceptNode: "new_concept", err: "gamification stats write failed" }),
+        "gamification stat sync failed",
+      ),
+    );
+  });
+
+  it("logs the raw value, not .message, when the stat sync rejects with something other than an Error", async () => {
+    failStatsSet.value = "non-error rejection";
+    await expect(
+      recordInteraction("u1", "new_concept", { errorType: "none", confidence: 1, isCorrect: true }),
+    ).resolves.toBeUndefined();
+
+    await vi.waitFor(() =>
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ uid: "u1", conceptNode: "new_concept", err: "non-error rejection" }),
+        "gamification stat sync failed",
+      ),
+    );
+  });
+
+  it("logs but does not throw when the best-effort maxAccuracy sync fails for an existing node", async () => {
+    // First interaction creates the node (stats sync succeeds, untouched by the flag).
+    await recordInteraction("u1", "mastered", { errorType: "none", confidence: 1, isCorrect: true });
+
+    // Second interaction takes the update path (outcome.created === false) and, since accuracy
+    // stays >= 0.9, fires the best-effort maxAccuracy transaction — which we make fail.
+    failStatsTxnGet.value = new Error("gamification stats transaction read failed");
+    await expect(
+      recordInteraction("u1", "mastered", { errorType: "none", confidence: 1, isCorrect: true }),
+    ).resolves.toBeUndefined();
+
+    expect(node("mastered")).toMatchObject({ correctCount: 2 });
+    await vi.waitFor(() =>
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ uid: "u1", conceptNode: "mastered" }),
+        "gamification stat sync failed",
+      ),
+    );
+  });
+
+  it("logs the raw value for a non-Error rejection from the maxAccuracy sync too", async () => {
+    await recordInteraction("u1", "mastered2", { errorType: "none", confidence: 1, isCorrect: true });
+    failStatsTxnGet.value = "non-error rejection";
+    await expect(
+      recordInteraction("u1", "mastered2", { errorType: "none", confidence: 1, isCorrect: true }),
+    ).resolves.toBeUndefined();
+
+    await vi.waitFor(() =>
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ uid: "u1", conceptNode: "mastered2", err: "non-error rejection" }),
+        "gamification stat sync failed",
+      ),
+    );
+  });
+
+  it("bootstraps the best-effort maxAccuracy stat when a stats doc already exists but has none yet", async () => {
+    // First interaction: an ungraded question — creates the node and a stats doc, but the
+    // create-path only sets maxAccuracy when the interaction was answered, so it is absent.
+    await recordInteraction("u1", "fresh_topic", { errorType: "none", confidence: 1 });
+    expect(statsWrites[0]).not.toHaveProperty("maxAccuracy");
+
+    // Second interaction: a correct answer — update path; statsRef exists but has no
+    // maxAccuracy yet, so `(snap.data().maxAccuracy ?? 0)` must fall back to 0.
+    await recordInteraction("u1", "fresh_topic", { errorType: "none", confidence: 1, isCorrect: true });
+
+    await vi.waitFor(() => expect(statsWrites.some((w) => w.maxAccuracy === 1)).toBe(true));
+  });
+
+  it("bootstraps the best-effort maxAccuracy stat when the stats doc has never existed at all", async () => {
+    // Seed the SMG node directly, bypassing recordInteraction's create path entirely, so the
+    // gamification/stats doc has genuinely never been written for this user.
+    store.set("users/u1/smg/seeded_topic", {
+      accuracyRate: 0, correctCount: 0, incorrectCount: 0, interactionCount: 0, errorTypeMap: {},
+    });
+    expect(statsWrites).toHaveLength(0);
+
+    await recordInteraction("u1", "seeded_topic", { errorType: "none", confidence: 1, isCorrect: true });
+
+    await vi.waitFor(() => expect(statsWrites.some((w) => w.maxAccuracy === 1)).toBe(true));
+  });
+
+  it("records exposure with none of the counters ever initialized, using every documented default", async () => {
+    // A node with literally none of the numeric/map fields set — as if written by some other
+    // path than recordInteraction — exercises every `data.<field> || <default>` fallback at once.
+    store.set("users/u1/smg/bare_node", {});
+
+    await recordInteraction("u1", "bare_node", { errorType: "none", confidence: 0.9 }); // a question, not an answer
+
+    const n = node("bare_node");
+    expect(n).toMatchObject({ correctCount: 0, incorrectCount: 0, interactionCount: 1, accuracyRate: 0 });
+    expect(n.errorTypeMap).toEqual({});
   });
 });

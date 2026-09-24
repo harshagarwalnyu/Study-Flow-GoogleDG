@@ -112,6 +112,35 @@ describe("aiLimiter", () => {
     expect(blocked.body.error).toMatch(/Too many requests/);
     await request(app).post("/ai").set("x-test-uid", "limit-b").expect(200);
   });
+
+  it("limits unauthenticated requests using ip fallback in keyGenerator", async () => {
+    const app = appFor();
+    const res = await request(app).post("/ai").expect(200);
+    expect(res.body.ok).toBe(true);
+  });
+
+  it("counts hits in Firestore when RATE_LIMIT_STORE=firestore", async () => {
+    docs.clear();
+    vi.resetModules();
+    vi.stubEnv("RATE_LIMIT_STORE", "firestore");
+    try {
+      const { aiLimiter: firestoreAiLimiter } = await import("./rateLimit");
+      const app = express();
+      app.use((req, _res, next) => {
+        req.user = { uid: "shared-u1" } as any;
+        next();
+      });
+      app.post("/ai", firestoreAiLimiter, (_req, res) => res.json({ ok: true }));
+
+      await request(app).post("/ai").expect(200);
+      await request(app).post("/ai").expect(200);
+
+      expect(docs.get("rateLimits/ai%3Ashared-u1")?.hits).toBe(2);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
 });
 
 describe("env parsing for rate limiting", () => {

@@ -1,5 +1,5 @@
 /// <reference types="bun-types" />
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, vi } from "vitest";
 import { badgeTextFor, badgeTitleFor, refreshDrillBadge, type BadgeApi } from "./drill-nudge";
 import { STORAGE_KEYS } from "./messages";
 import type { StorageAreaLike } from "./chrome-storage";
@@ -45,7 +45,7 @@ describe("badge text", () => {
 describe("refreshDrillBadge", () => {
   it("counts only due reviews, with the stored token, against the configured API", async () => {
     const action = badge();
-    const fetchImpl = mock(async (_url: string, _init?: RequestInit) =>
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) =>
       queueResponse([
         { conceptNode: "chain_rule", urgency: 14, due: true },
         { conceptNode: "limits", urgency: 12, due: true },
@@ -73,7 +73,7 @@ describe("refreshDrillBadge", () => {
 
   it("clears the badge when signed out, without calling the API", async () => {
     const action = badge();
-    const fetchImpl = mock(async () => queueResponse([]));
+    const fetchImpl = vi.fn(async () => queueResponse([]));
     const count = await refreshDrillBadge({
       localStorage: storage(),
       sessionStorage: storage(),

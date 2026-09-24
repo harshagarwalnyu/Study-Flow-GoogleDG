@@ -77,6 +77,21 @@ describe('firestore service', () => {
       expect(mockBatch.set).toHaveBeenCalledTimes(2);
       expect(mockBatch.commit).toHaveBeenCalled();
     });
+
+    it('defaults courseId and requestMeta to null when omitted', async () => {
+      mockDb.id = 'event-id-2';
+      await saveInteraction('user123', {
+        courseId: null,
+        content: 'test content',
+        eventType: 'explain',
+        response: { answer: 'text' },
+        classifierTag: { conceptNode: 'A', errorType: 'B', confidence: 0.9 },
+      });
+
+      const payload = mockBatch.set.mock.calls[0][1];
+      expect(payload.courseId).toBeNull();
+      expect(payload.request).toBeNull();
+    });
   });
 
   describe('saveClientEvent', () => {
@@ -94,6 +109,16 @@ describe('firestore service', () => {
 
       expect(result).toBe('client-event-id');
       expect(mockBatch.set).toHaveBeenCalledTimes(2);
+    });
+
+    it('defaults content, meta and requestMeta to null when omitted', async () => {
+      mockDb.id = 'client-event-id-2';
+      await saveClientEvent('user123', { eventType: 'login' });
+
+      const payload = mockBatch.set.mock.calls[0][1];
+      expect(payload.content).toBeNull();
+      expect(payload.meta).toBeNull();
+      expect(payload.request).toBeNull();
     });
   });
 
@@ -120,6 +145,18 @@ describe('firestore service', () => {
       await ensureUserDoc('uid', 'email', 'name');
 
       expect(mockDb.set).not.toHaveBeenCalled();
+    });
+
+    it('defaults displayName to null when not provided', async () => {
+      mockDb.get.mockResolvedValue({ exists: false });
+
+      await ensureUserDoc('uid', 'email', null);
+
+      expect(mockDb.set).toHaveBeenCalledWith({
+        email: 'email',
+        displayName: null,
+        createdAt: 'mock-timestamp',
+      });
     });
   });
 });

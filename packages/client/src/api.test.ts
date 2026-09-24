@@ -113,6 +113,17 @@ describe("createApiClient", () => {
     );
   });
 
+  it("falls back to a generic message when neither body nor status text explain the error", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: "",
+      json: async () => ({ error: "" }),
+    });
+    const client = createApiClient({ apiUrl: "http://localhost:3000", fetchImpl });
+    await expect(client.apiFetch("/api/v1/error")).rejects.toThrow("Request failed");
+  });
+
   it("allows skipping JSON Content-Type", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,

@@ -87,6 +87,11 @@ describe("storage round trip and retrievability", () => {
     expect(card.state).toBe(State.New);
   });
 
+  it("parses ISO date strings from stored JSON", () => {
+    const card = fromStored({ due: "2026-10-01T00:00:00.000Z" }, t0);
+    expect(card.due).toEqual(new Date("2026-10-01T00:00:00.000Z"));
+  });
+
   it("predicts recall decaying over time, and 0 for never-reviewed nodes", () => {
     const card = applyEvidence(null, { isCorrect: true }, t0).card;
     const soon = retrievability(card, new Date(t0.getTime() + DAY));
@@ -114,6 +119,10 @@ describe("drillPriority", () => {
     expect(asked.urgency).toBeGreaterThan(ingested.urgency);
     expect(ingested).toEqual({ urgency: 5, due: false });
     expect(asked).toEqual({ urgency: 6, due: false });
+  });
+
+  it("treats a new node with no recorded interactions as not yet asked about", () => {
+    expect(drillPriority({ fsrs: newCard(t0) }, t0)).toEqual({ urgency: 5, due: false });
   });
 
   it("puts reviews that are not yet due after new material, weaker concepts first", () => {

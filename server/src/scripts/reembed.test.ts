@@ -14,7 +14,14 @@ vi.mock("../services/embeddings", () => ({
   EMBEDDING_DIM: 768,
 }));
 
-import { reembedStaleChunks, _parseArgsForTests as parseArgs } from "./reembed";
+const { dbHolder } = vi.hoisted(() => ({ dbHolder: { db: null as any } }));
+vi.mock("../db/firebase", () => ({
+  get db() {
+    return dbHolder.db;
+  },
+}));
+
+import { reembedStaleChunks, main, _parseArgsForTests as parseArgs } from "./reembed";
 
 type Row = { id: string; data: Record<string, any> };
 
@@ -162,5 +169,35 @@ describe("parseArgs", () => {
     expect(parseArgs([])).toEqual({ dryRun: false });
     expect(() => parseArgs(["--uid"])).toThrow(/requires a value/);
     expect(() => parseArgs(["--uid", "--dry-run"])).toThrow(/requires a value/);
+  });
+});
+
+describe("reembed main", () => {
+  beforeEach(() => {
+    mockEmbedDocuments.mockReset();
+    mockEmbedDocuments.mockImplementation(async (texts: string[]) => texts.map((_, i) => [i]));
+    mockEmbedLabels.mockReset();
+  });
+
+  it("migrates the app database and prints the counts", async () => {
+    const { db, updates } = fakeDb({ all: [row("a", {})] });
+    dbHolder.db = db;
+    const log = vi.fn();
+    const res = await main([], log);
+    expect(res).toMatchObject({ scanned: 1, stale: 1, updated: 1 });
+    expect(updates.map((u) => u.id)).toEqual(["a"]);
+    expect(log).toHaveBeenLastCalledWith(
+      "model=gemini-embedding-2 chunks: scanned=1 stale=1 updated=1; concepts: scanned=0 updated=0",
+    );
+  });
+
+  it("labels a dry run and rejects a bad --uid before touching data", async () => {
+    const { db, updates } = fakeDb({ all: [row("a", {})] });
+    dbHolder.db = db;
+    const log = vi.fn();
+    await main(["--dry-run"], log);
+    expect(updates).toHaveLength(0);
+    expect(log.mock.lastCall?.[0]).toMatch(/^\[dry run\] model=/);
+    await expect(main(["--uid"], log)).rejects.toThrow("--uid requires a value");
   });
 });
