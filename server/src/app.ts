@@ -8,6 +8,7 @@ import { env } from "./env";
 import { logger } from "./logger";
 
 export const app = express();
+app.set("trust proxy", env.trustProxy);
 
 const allowedOrigins = env.allowedOrigins
   .split(",")

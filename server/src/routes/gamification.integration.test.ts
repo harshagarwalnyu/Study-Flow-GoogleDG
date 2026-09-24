@@ -21,7 +21,7 @@ vi.mock("../services/gamification", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next() }));
+vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next(), aiLimiter: (req: any, res: any, next: any) => next() }));
 vi.mock("../middleware/auth", () => ({
   requireFirebaseAuth: (req: any, res: any, next: any) => {
     req.user = { uid: "user123", email: "u@e.com", name: "User" };

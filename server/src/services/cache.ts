@@ -1,7 +1,12 @@
 /**
  * Simple in-memory TTL cache for Firestore reads.
- * Single-process only — no shared state across workers.
  * Keys are scoped by caller (e.g. "courses:uid123").
+ *
+ * Per process. With several instances, cacheInvalidate only clears the instance that handled the
+ * write, so another instance may serve a stale value until its TTL expires (60 s for graph/drill,
+ * 2 min for courses). That bound is the design: TTLs stay short, and session affinity at the load
+ * balancer (e.g. Cloud Run --session-affinity) routes a user back to the instance that saw the
+ * write. Anything that must be exact across instances belongs in Firestore, not here.
  */
 
 interface CacheEntry<T = any> {

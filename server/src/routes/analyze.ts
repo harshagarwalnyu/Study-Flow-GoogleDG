@@ -5,6 +5,7 @@ import { getStudentProfile } from "../services/misconception";
 import { ensureUserDoc } from "../services/firestore";
 import { extractTextFromBase64 } from "../services/ocr";
 import { requireFirebaseAuth } from "../middleware/auth";
+import { aiLimiter } from "../middleware/rateLimit";
 import { validate } from "../middleware/validate";
 import { analyzeSchema } from "../schemas";
 import { recordActivity } from "../services/gamification";
@@ -14,7 +15,7 @@ import { recordQuestionInteraction, formatContext, sourcesFrom } from "../servic
 
 export const analyzeRouter = Router();
 
-analyzeRouter.post("/", requireFirebaseAuth, validate(analyzeSchema), async (req: Request, res: Response, next: NextFunction) => {
+analyzeRouter.post("/", requireFirebaseAuth, aiLimiter, validate(analyzeSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const uid = req.user!.uid;
     const { courseId, content, imageBase64 } = req.body ?? {};

@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { requireFirebaseAuth } from '../middleware/auth'
+import { aiLimiter } from '../middleware/rateLimit'
 import { validate } from '../middleware/validate'
 import { explainConceptStream } from '../services/gemini'
 import { retrieveChunks } from '../services/rag'
@@ -17,7 +18,7 @@ const schema = z.object({
   courseId: z.string().optional(),
 })
 
-router.post('/explain', requireFirebaseAuth, validate(schema), async (req: Request, res: Response) => {
+router.post('/explain', requireFirebaseAuth, aiLimiter, validate(schema), async (req: Request, res: Response) => {
   const uid = req.user!.uid
   const { question, courseId } = req.body
 

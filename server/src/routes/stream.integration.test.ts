@@ -60,7 +60,7 @@ vi.mock("firebase-admin/firestore", () => ({
 vi.mock("firebase-admin/auth", () => ({ getAuth: vi.fn(() => ({ verifyIdToken: vi.fn() })) }));
 vi.mock("firebase-admin/app", () => ({ initializeApp: vi.fn(), cert: vi.fn(), getApps: vi.fn(() => [{ name: "m" }]) }));
 
-vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next() }));
+vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next(), aiLimiter: (req: any, res: any, next: any) => next() }));
 vi.mock("../middleware/auth", () => ({
   requireFirebaseAuth: (req: any, res: any, next: any) => {
     req.user = { uid: "user123" };

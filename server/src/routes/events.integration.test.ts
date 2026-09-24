@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import request from "supertest";
 
 // Mock necessary deps
-vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next() }));
+vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next(), aiLimiter: (req: any, res: any, next: any) => next() }));
 vi.mock("firebase-admin/app", () => ({ initializeApp: vi.fn(), cert: vi.fn(), getApps: vi.fn(() => [{ name: "mock" }]) }));
 
 const mockSnap = {

@@ -4,6 +4,7 @@ import request from "supertest";
 // ── Mock rate limiter to be a pass-through ──────────────────────────────
 vi.mock("../middleware/rateLimit", () => ({
   apiLimiter: (_req: any, _res: any, next: any) => next(),
+  aiLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 
 // ── Mock Firebase Admin SDK before anything imports it ───────────────────

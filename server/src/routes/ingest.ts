@@ -2,6 +2,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import multer from "multer";
 import { mkdir, unlink } from "node:fs/promises";
 import { requireFirebaseAuth } from "../middleware/auth";
+import { aiLimiter } from "../middleware/rateLimit";
 import { validate } from "../middleware/validate";
 import { ingestTextSchema } from "../schemas";
 import { ingestFile, ingestText } from "../services/ingestion";
@@ -16,11 +17,12 @@ export const ingestRouter = Router();
 
 /**
  * POST /api/v1/ingest/upload — Upload a file for ingestion.
- * Chunks the file, embeds it, stores in Firestore, and uploads to Gemini File API.
+ * Chunks the file, embeds it, and stores the chunks in Firestore.
  */
 ingestRouter.post(
   "/upload",
   requireFirebaseAuth,
+  aiLimiter, // before multer, so over-limit uploads are rejected before the body is written
   upload.single("file"),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -57,7 +59,7 @@ ingestRouter.post(
  * POST /api/v1/ingest/text — Ingest raw text content (from content script).
  * Used by the Brightspace/Gradescope content scripts to ship page content.
  */
-ingestRouter.post("/text", requireFirebaseAuth, validate(ingestTextSchema), async (req: Request, res: Response, next: NextFunction) => {
+ingestRouter.post("/text", requireFirebaseAuth, aiLimiter, validate(ingestTextSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const uid = req.user!.uid;
     const { courseId, rawContent, sourcePlatform, filename } = req.body;

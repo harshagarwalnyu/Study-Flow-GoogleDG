@@ -3,6 +3,7 @@ import { explainConcept } from "../services/gemini";
 import { retrieveChunkRecords } from "../services/rag";
 import { getStudentProfile } from "../services/misconception";
 import { requireFirebaseAuth } from "../middleware/auth";
+import { aiLimiter } from "../middleware/rateLimit";
 import { validate } from "../middleware/validate";
 import { explainSchema } from "../schemas";
 import { recordQuestionInteraction, formatContext, sourcesFrom } from "../services/interactions";
@@ -17,7 +18,7 @@ export const explainRouter = Router();
  * misconception graph — classification and the SMG update run after the response is sent,
  * keeping the classifier off the latency path. Use POST /api/v1/analyze to wait for the tag.
  */
-explainRouter.post("/", requireFirebaseAuth, validate(explainSchema), async (req: Request, res: Response, next: NextFunction) => {
+explainRouter.post("/", requireFirebaseAuth, aiLimiter, validate(explainSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const uid = req.user!.uid;
     const { question, courseId } = req.body;

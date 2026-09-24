@@ -19,6 +19,22 @@ export function parsePositiveFloat(input: unknown, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/**
+ * Express "trust proxy": hop count (e.g. 1 behind Cloud Run / one load balancer), true, or false.
+ * Too permissive lets clients spoof X-Forwarded-For and dodge per-IP limits; too strict makes
+ * every request look like it came from the proxy, so all users share one rate-limit bucket.
+ */
+export function parseTrustProxy(input: unknown): boolean | number {
+  if (input == null || String(input).trim() === "") return false;
+  const hops = Number.parseInt(String(input), 10);
+  if (Number.isFinite(hops) && hops >= 0) return hops;
+  return parseBoolean(input, false);
+}
+
+export function parseRateLimitStore(input: unknown): "memory" | "firestore" {
+  return String(input ?? "").trim().toLowerCase() === "firestore" ? "firestore" : "memory";
+}
+
 const sharedEnv = parseServerEnvironment(process.env);
 
 export const env = {
@@ -41,4 +57,9 @@ export const env = {
   googleApplicationCredentials: sharedEnv.GOOGLE_APPLICATION_CREDENTIALS,
   // Comma-separated allowed origins for CORS; defaults to permissive in dev
   allowedOrigins: sharedEnv.ALLOWED_ORIGINS,
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
+  // "firestore" shares the AI rate limit across instances; "memory" (default) is per process.
+  rateLimitStore: parseRateLimitStore(process.env.RATE_LIMIT_STORE),
+  rateLimitIpPerMinute: parsePositiveInt(process.env.RATE_LIMIT_IP_PER_MINUTE, 120),
+  rateLimitAiPerMinute: parsePositiveInt(process.env.RATE_LIMIT_AI_PER_MINUTE, 20),
 };

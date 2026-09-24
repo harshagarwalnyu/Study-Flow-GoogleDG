@@ -6,6 +6,7 @@ import { retrieveChunks } from "../services/rag";
 import { getWeakestConcepts, recordInteraction, getDrillQueue } from "../services/misconception";
 import { saveInteraction } from "../services/firestore";
 import { requireFirebaseAuth } from "../middleware/auth";
+import { aiLimiter } from "../middleware/rateLimit";
 import { validate } from "../middleware/validate";
 import { quizGenerateSchema, quizAnswerSchema } from "../schemas";
 import { cacheInvalidate } from "../services/cache";
@@ -36,7 +37,7 @@ function shuffleQuestion(question: any) {
  * POST /api/v1/quiz — Generate quiz questions.
  * If no topic is given, picks from the student's weakest SMG concepts.
  */
-quizRouter.post("/", requireFirebaseAuth, validate(quizGenerateSchema), async (req: Request, res: Response, next: NextFunction) => {
+quizRouter.post("/", requireFirebaseAuth, aiLimiter, validate(quizGenerateSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const uid = req.user!.uid;
     const { topic, courseId, count } = req.body;
