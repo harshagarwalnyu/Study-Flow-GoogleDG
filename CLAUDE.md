@@ -65,4 +65,4 @@ Vector indexes: `firestore.indexes.json`. Deploy order: `firebase deploy --only 
 `apiLimiter` per IP before auth; `aiLimiter` per uid after `requireFirebaseAuth` on Gemini-backed routes — keep that order when adding routes. `services/cache.ts` is per process (staleness ≤ TTL across instances).
 
 ### Tests / CI
-Vitest mocks Firebase Admin and Gemini; no credentials needed. When a route gains a middleware export, update the `vi.mock("../middleware/rateLimit")` factories in route tests. Response fields must be added to the zod schemas in `packages/shared/src/contracts/api.ts` or clients silently lose them. CI (bun 1.3.11): lint, test-server (coverage), build, security (`bun audit`).
+Vitest mocks Firebase Admin and Gemini; no credentials needed. When a route gains a middleware export, update the `vi.mock("../middleware/rateLimit")` factories in route tests. Response fields must be added to the zod schemas in `packages/shared/src/contracts/api.ts` or clients silently lose them. CI (bun 1.4.2, Node 24 for vitest 5): lint, test-server (100% coverage in every workspace), build, security (`bun audit`).
