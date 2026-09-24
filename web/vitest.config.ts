@@ -12,6 +12,9 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // jsdom renders under v8 coverage run 1-6s per test on 2-4 vCPU machines (CI runners, WSL);
+    // vitest's 5s default is sized for node unit tests and flakes here.
+    testTimeout: 15_000,
     coverage: {
       provider: "v8",
       reporter: ["lcov", "text"],
