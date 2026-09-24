@@ -28,7 +28,7 @@ vi.mock("../services/gemini", () => ({
   explainConcept: mockExplain,
   classifyConcept: mockClassify,
 }));
-vi.mock("../services/rag", () => ({ retrieveChunks: mockRetrieveChunks }));
+vi.mock("../services/rag", () => ({ retrieveChunkRecords: mockRetrieveChunks }));
 vi.mock("../services/misconception", () => ({ recordInteraction: mockRecordInteraction, getStudentProfile: vi.fn().mockResolvedValue(null) }));
 vi.mock("../services/concepts", async (importOriginal) => {
   const actual: any = await importOriginal();
@@ -85,7 +85,7 @@ describe("Analyze API Integration", () => {
       personalizedCallout: "well done",
     });
     mockClassify.mockResolvedValue({ conceptNode: "node1", errorType: "none", confidence: 0.9 });
-    mockRetrieveChunks.mockResolvedValue(["chunk1"]);
+    mockRetrieveChunks.mockResolvedValue([{ content: "chunk1", courseId: "c1", distance: 0.1, filename: "w1.pdf" }]);
 
     const res = await request(app)
       .post("/api/v1/analyze")
@@ -107,14 +107,15 @@ describe("Analyze API Integration", () => {
     });
     mockExplain.mockResolvedValue({ solution: "sol", mainConcept: "Chain rule" });
     mockClassify.mockResolvedValue({ conceptNode: "derivatives_chain_rule", errorType: "procedural_error", confidence: 0.8 });
-    mockRetrieveChunks.mockResolvedValue(["chunk1"]);
+    mockRetrieveChunks.mockResolvedValue([{ content: "chunk1", courseId: "c1", distance: 0.1, filename: "w1.pdf" }]);
 
     const res = await request(app)
       .post("/api/v1/analyze")
       .send({ courseId: "c1", content: "Why is d/dx sin(x^2) not cos(x^2)? I keep getting this wrong." });
 
     expect(res.status).toBe(200);
-    expect(mockExplain).toHaveBeenCalledWith(expect.any(String), "chunk1", profile);
+    expect(mockExplain).toHaveBeenCalledWith(expect.any(String), "[1] (from w1.pdf)\nchunk1", profile);
+    expect(res.body.sources).toEqual([{ filename: "w1.pdf", courseId: "c1" }]);
     expect(mockClassify).toHaveBeenCalledWith(expect.any(String), "sol", ["chain_rule"]);
     expect(res.body.classifierTag.conceptNode).toBe("chain_rule");
     const [uid, node, params] = mockRecordInteraction.mock.calls[0];

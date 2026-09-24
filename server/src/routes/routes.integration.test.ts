@@ -84,6 +84,10 @@ vi.mock("../services/gemini", () => ({
 
 vi.mock("../services/rag", () => ({
   retrieveChunks: vi.fn().mockResolvedValue(["Chunk 1: Derivatives are...", "Chunk 2: The chain rule states..."]),
+  retrieveChunkRecords: vi.fn().mockResolvedValue([
+    { content: "Chunk 1: Derivatives are...", courseId: "c1", distance: 0.1, filename: "notes.pdf" },
+    { content: "Chunk 2: The chain rule states...", courseId: "c1", distance: 0.2, filename: "notes.pdf" },
+  ]),
 }));
 
 vi.mock("../services/firestore", () => ({

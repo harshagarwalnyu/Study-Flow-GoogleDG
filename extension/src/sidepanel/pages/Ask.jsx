@@ -334,6 +334,16 @@ export function Ask() {
       {showResponse && (
         <div className={styles.response}>
           <MathRenderer text={streamingText || response?.solution || response?.explanation || ""} />
+          {response?.personalizedCallout && (
+            <p className={styles.callout}>
+              <strong>For you:</strong> {response.personalizedCallout}
+            </p>
+          )}
+          {response?.sources?.length > 0 && (
+            <p className={styles.sources}>
+              From your course: {response.sources.map((s) => s.filename).join(", ")}
+            </p>
+          )}
         </div>
       )}
     </div>

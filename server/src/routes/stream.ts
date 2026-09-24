@@ -2,15 +2,13 @@ import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { requireFirebaseAuth } from '../middleware/auth'
 import { validate } from '../middleware/validate'
-import { explainConceptStream, classifyConcept } from '../services/gemini'
+import { explainConceptStream } from '../services/gemini'
 import { retrieveChunks } from '../services/rag'
-import { recordInteraction, getStudentProfile } from '../services/misconception'
-import { saveInteraction } from '../services/firestore'
+import { getStudentProfile } from '../services/misconception'
 import { addXP, updateStreak } from '../services/gamification'
-import { cacheInvalidate } from '../services/cache'
 import { logger } from '../logger'
 import { shouldUseCourseRag } from '../services/ragPolicy'
-import { normalizeClassifierTag, resolveConceptNode, listKnownConcepts } from '../services/concepts'
+import { recordQuestionInteraction } from '../services/interactions'
 
 const router = Router()
 
@@ -73,29 +71,12 @@ router.post('/explain', requireFirebaseAuth, validate(schema), async (req: Reque
     res.end()
 
     if (fullAnswer.trim()) {
-      listKnownConcepts(uid)
-        .then((known) => classifyConcept(question, fullAnswer, known))
-        .then(async (raw) => {
-          const normalized = normalizeClassifierTag(raw, '')
-          const resolved = await resolveConceptNode(uid, normalized.conceptNode)
-          const classifierTag = { ...normalized, conceptNode: resolved.conceptNode }
-          // A question is not a graded answer: record exposure and error type, not correctness.
-          recordInteraction(uid, classifierTag.conceptNode, {
-            errorType: classifierTag.errorType,
-            confidence: classifierTag.confidence,
-            courseId,
-            labelEmbedding: resolved.labelEmbedding,
-          }).catch((err) => logger.warn({ err, uid }, 'stream recordInteraction failed'))
-          saveInteraction(uid, {
-            courseId,
-            content: question,
-            eventType: 'explain',
-            response: { solution: fullAnswer },
-            classifierTag,
-          }).catch((err) => logger.warn({ err, uid }, 'stream saveInteraction failed'))
-          cacheInvalidate(`graph:${uid}`)
-          cacheInvalidate(`drill:${uid}`)
-        })
+      recordQuestionInteraction(uid, {
+        question,
+        solution: fullAnswer,
+        courseId,
+        response: { solution: fullAnswer },
+      })
         .catch((err) => logger.warn({ err, uid }, 'stream side-effects failed'))
 
       addXP(uid, 5, 'explain').catch((err) => logger.warn({ err, uid }, 'stream addXP failed'))

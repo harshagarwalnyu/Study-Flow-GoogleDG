@@ -90,7 +90,7 @@ Respond with ONLY a JSON object:
 {
   "solution": "string (markdown allowed, use $...$ for inline math, $$...$$ for block math)",
   "mainConcept": "string (short)",
-  "relevantLecture": "string (or empty string)",
+  "relevantLecture": "string (the file name(s) of the course material you actually used, from the [n] (from ...) labels; empty string if none)",
   "keyFormulas": ["string", "string"],
   "personalizedCallout": "string (or empty string)"
 }`;

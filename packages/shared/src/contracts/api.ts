@@ -75,6 +75,8 @@ export const explanationSchema = z.object({
   relevantLecture: z.string(),
   keyFormulas: z.array(z.string()),
   personalizedCallout: z.string(),
+  /** Course files whose chunks were given to the model, closest match first. */
+  sources: z.array(z.object({ filename: z.string(), courseId: z.string() })).optional(),
 });
 
 export const analyzeResponseSchema = explanationSchema.extend({
