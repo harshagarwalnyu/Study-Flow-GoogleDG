@@ -33,8 +33,7 @@ const {
   mockRecordInteraction, 
   mockSaveInteraction,
   mockGetDrillQueue,
-  mockAddXP,
-  mockUpdateStreak
+  mockRecordActivity,
 } = vi.hoisted(() => ({
   mockGenerateQuiz: vi.fn(),
   mockRetrieveChunks: vi.fn().mockResolvedValue([]),
@@ -42,8 +41,7 @@ const {
   mockRecordInteraction: vi.fn().mockResolvedValue(undefined),
   mockSaveInteraction: vi.fn().mockResolvedValue("eid"),
   mockGetDrillQueue: vi.fn().mockResolvedValue([]),
-  mockAddXP: vi.fn().mockResolvedValue(undefined),
-  mockUpdateStreak: vi.fn().mockResolvedValue(undefined),
+  mockRecordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Mock services
@@ -68,7 +66,7 @@ vi.mock("../services/misconception", () => ({
   getDrillQueue: mockGetDrillQueue,
 }));
 vi.mock("../services/firestore", () => ({ saveInteraction: mockSaveInteraction }));
-vi.mock("../services/gamification", () => ({ addXP: mockAddXP, updateStreak: mockUpdateStreak }));
+vi.mock("../services/gamification", () => ({ recordActivity: mockRecordActivity }));
 vi.mock("../services/cache", () => ({ cacheInvalidate: vi.fn() }));
 
 vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next() }));
@@ -181,6 +179,21 @@ describe("Quiz API Integration", () => {
       expect(res.status).toBe(200);
       expect(res.body.isCorrect).toBe(true);
       expect(mockRecordInteraction).toHaveBeenCalled();
+      expect(mockRecordActivity).toHaveBeenCalledWith("user123", { xp: 10, quizCorrect: true });
+    });
+
+    it("records a wrong answer as activity without XP", async () => {
+      mockDb.get.mockResolvedValue({
+        exists: true,
+        data: () => ({ questions: [{ conceptNode: "n1", answer: 0 }], expiresAt: Date.now() + 100000 }),
+      });
+
+      const res = await request(app)
+        .post("/api/v1/quiz/answer")
+        .send({ conceptNode: "n1", selectedAnswer: 2, sessionId: "550e8400-e29b-41d4-a716-446655440000", questionIndex: 0 });
+
+      expect(res.body.isCorrect).toBe(false);
+      expect(mockRecordActivity).toHaveBeenCalledWith("user123", {});
     });
 
     it("returns 400 if session expired", async () => {

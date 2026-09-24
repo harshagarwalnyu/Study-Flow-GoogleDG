@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getGamificationData, addXP, updateStreak } from './gamification';
+import { getGamificationData, recordActivity, DAILY_STREAK_XP } from './gamification';
 
-const { mockDb, mockBatch, mockFieldValue } = vi.hoisted(() => {
+const { mockDb, mockBatch, mockFieldValue, mockTxn } = vi.hoisted(() => {
   const mockDb = {
     collection: vi.fn(),
     doc: vi.fn(),
     get: vi.fn(),
     set: vi.fn(),
     batch: vi.fn(),
+    runTransaction: vi.fn(),
   };
+  const mockTxn = { get: vi.fn(), set: vi.fn() };
   const mockBatch = {
     set: vi.fn(),
     commit: vi.fn().mockResolvedValue(true),
@@ -20,8 +22,10 @@ const { mockDb, mockBatch, mockFieldValue } = vi.hoisted(() => {
   return { 
     mockDb, 
     mockBatch,
+    mockTxn,
     mockFieldValue: {
-      increment: vi.fn((n) => ({ type: 'increment', value: n }))
+      increment: vi.fn((n) => ({ type: 'increment', value: n })),
+      arrayUnion: vi.fn((...v) => v),
     }
   };
 });
@@ -36,6 +40,7 @@ describe('gamification service', () => {
     vi.clearAllMocks();
     mockDb.collection.mockReturnValue(mockDb);
     mockDb.doc.mockReturnValue(mockDb);
+    mockDb.runTransaction.mockImplementation(async (fn: any) => fn(mockTxn));
   });
 
   describe('getGamificationData', () => {
@@ -94,84 +99,54 @@ describe('gamification service', () => {
     });
   });
 
-  describe('addXP', () => {
-    it('increments XP and lastActivity', async () => {
-      await addXP('user1', 50, 'ask_question');
-      expect(mockDb.set).toHaveBeenCalledWith(
-        expect.objectContaining({
-          xp: { type: 'increment', value: 50 },
-          lastActivity: expect.any(String)
-        }),
-        { merge: true }
-      );
-    });
+  describe('recordActivity', () => {
+    const now = new Date('2026-09-24T15:00:00Z');
+    const stats = (data: any) => mockTxn.get.mockResolvedValue({ exists: data !== null, data: () => data });
+    const written = () => mockTxn.set.mock.calls[0][1];
 
-    it('increments quizCount for quiz_correct reason', async () => {
-      await addXP('user1', 10, 'quiz_correct');
-      expect(mockDb.set).toHaveBeenCalledWith(
-        expect.objectContaining({
-          quizCount: { type: 'increment', value: 1 }
-        }),
-        { merge: true }
-      );
-    });
-
-    it('logs warning on failure', async () => {
-      mockDb.set.mockRejectedValue(new Error('Write failed'));
-      await addXP('user1', 50, 'test');
-      // No crash
-    });
-  });
-
-  describe('updateStreak', () => {
-    it('increments streak if last activity was yesterday', async () => {
-      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      mockDb.get.mockResolvedValue({
-        exists: true,
-        data: () => ({ lastActivityDate: yesterday, streak: 3 })
+    it('grants the action XP plus the daily bonus and extends the streak on the first activity of a day', async () => {
+      stats({ lastActivityDate: '2026-09-23', streak: 4 });
+      await recordActivity('u1', { xp: 5 }, now);
+      expect(mockDb.runTransaction).toHaveBeenCalledTimes(1);
+      expect(written()).toEqual({
+        lastActivity: now.toISOString(),
+        xp: { type: 'increment', value: 5 + DAILY_STREAK_XP },
+        lastActivityDate: '2026-09-24',
+        streak: 5,
       });
-
-      await updateStreak('user1');
-
-      expect(mockDb.set).toHaveBeenCalledWith(
-        expect.objectContaining({
-          streak: 4,
-          xp: { type: 'increment', value: 20 }
-        }),
-        { merge: true }
-      );
+      expect(mockTxn.set.mock.calls[0][2]).toEqual({ merge: true });
     });
 
-    it('sets streak to 1 if last activity was long ago', async () => {
-      mockDb.get.mockResolvedValue({
-        exists: true,
-        data: () => ({ lastActivityDate: '2000-01-01', streak: 10 })
+    it('grants only the action XP later the same day, so concurrent requests cannot double the bonus', async () => {
+      stats({ lastActivityDate: '2026-09-24', streak: 5 });
+      await recordActivity('u1', { xp: 10, quizCorrect: true }, now);
+      expect(written()).toEqual({
+        lastActivity: now.toISOString(),
+        xp: { type: 'increment', value: 10 },
+        quizCount: { type: 'increment', value: 1 },
       });
-
-      await updateStreak('user1');
-
-      expect(mockDb.set).toHaveBeenCalledWith(
-        expect.objectContaining({ streak: 1 }),
-        { merge: true }
-      );
     });
 
-    it('does nothing if already active today', async () => {
-      const today = new Date().toISOString().slice(0, 10);
-      mockDb.get.mockResolvedValue({
-        exists: true,
-        data: () => ({ lastActivityDate: today })
-      });
+    it('restarts the streak after a missed day, and starts one for a new user', async () => {
+      stats({ lastActivityDate: '2026-09-20', streak: 9 });
+      await recordActivity('u1', {}, now);
+      expect(written()).toMatchObject({ streak: 1, xp: { value: DAILY_STREAK_XP } });
 
-      await updateStreak('user1');
-
-      expect(mockDb.set).not.toHaveBeenCalled();
+      mockTxn.set.mockClear();
+      stats(null);
+      await recordActivity('u1', {}, now);
+      expect(written()).toMatchObject({ streak: 1, lastActivityDate: '2026-09-24' });
     });
 
-    it('logs warning on failure', async () => {
-      mockDb.get.mockRejectedValue(new Error('Read failed'));
-      await updateStreak('user1');
-      // No crash
+    it('writes no XP field for a zero-XP action on an already-active day', async () => {
+      stats({ lastActivityDate: '2026-09-24' });
+      await recordActivity('u1', {}, now);
+      expect(written()).toEqual({ lastActivity: now.toISOString() });
+    });
+
+    it('never throws: gamification must not fail a study request', async () => {
+      mockDb.runTransaction.mockRejectedValueOnce(new Error('contention'));
+      await expect(recordActivity('u1', { xp: 5 }, now)).resolves.toBeUndefined();
     });
   });
 });

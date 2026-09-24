@@ -7,8 +7,7 @@ const {
   mockRetrieveChunks, 
   mockRecordInteraction, 
   mockSaveInteraction, 
-  mockAddXP, 
-  mockUpdateStreak,
+  mockRecordActivity, 
   mockShouldUseRag
 } = vi.hoisted(() => {
   const promiseWithCatch = () => {
@@ -23,8 +22,7 @@ const {
     mockRetrieveChunks: vi.fn().mockResolvedValue([]),
     mockRecordInteraction: vi.fn().mockImplementation(promiseWithCatch),
     mockSaveInteraction: vi.fn().mockImplementation(promiseWithCatch),
-    mockAddXP: vi.fn().mockImplementation(promiseWithCatch),
-    mockUpdateStreak: vi.fn().mockImplementation(promiseWithCatch),
+    mockRecordActivity: vi.fn().mockImplementation(promiseWithCatch),
     mockShouldUseRag: vi.fn().mockReturnValue(true),
   };
 });
@@ -50,7 +48,7 @@ vi.mock("../services/concepts", async (importOriginal) => {
   };
 });
 vi.mock("../services/firestore", () => ({ saveInteraction: mockSaveInteraction }));
-vi.mock("../services/gamification", () => ({ addXP: mockAddXP, updateStreak: mockUpdateStreak }));
+vi.mock("../services/gamification", () => ({ recordActivity: mockRecordActivity }));
 vi.mock("../services/ragPolicy", () => ({ shouldUseCourseRag: mockShouldUseRag }));
 vi.mock("../services/cache", () => ({ cacheInvalidate: vi.fn() }));
 
@@ -96,7 +94,7 @@ describe("Stream API Integration", () => {
     expect(res.status).toBe(200);
     expect(res.text).toContain("[DONE]");
 
-    await vi.waitFor(() => expect(mockUpdateStreak).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockRecordActivity).toHaveBeenCalled());
   });
 
   it("handles failures and side-effect errors", async () => {
@@ -118,14 +116,12 @@ describe("Stream API Integration", () => {
     // But make internal ones fail
     mockRecordInteraction.mockRejectedValue(new Error("side fail"));
     mockSaveInteraction.mockRejectedValue(new Error("side fail"));
-    mockAddXP.mockRejectedValue(new Error("side fail"));
-    mockUpdateStreak.mockRejectedValue(new Error("side fail"));
 
     const res = await request(app)
       .post("/api/v1/stream/explain")
       .send({ question: "test" });
 
     expect(res.status).toBe(200);
-    await vi.waitFor(() => expect(mockUpdateStreak).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockRecordActivity).toHaveBeenCalled());
   });
 });

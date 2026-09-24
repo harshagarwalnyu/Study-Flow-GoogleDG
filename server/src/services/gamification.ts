@@ -69,13 +69,15 @@ export async function getGamificationData(uid: string): Promise<GamificationResp
     }
 
     if (newlyUnlocked.length > 0) {
-      const dates = { ...(gam.achievementDates || {}) }
+      // arrayUnion + a nested merge: two concurrent reads cannot drop each other's unlocks.
       const now = new Date().toISOString()
-      newlyUnlocked.forEach((id) => { dates[id] = now })
+      const newDates = Object.fromEntries(newlyUnlocked.map((id) => [id, now]))
       await userRef.collection('gamification').doc('stats').set(
-        { unlockedAchievements: [...unlocked], achievementDates: dates },
+        { unlockedAchievements: FieldValue.arrayUnion(...newlyUnlocked), achievementDates: newDates },
         { merge: true }
       )
+      // So the response reports unlockedAt for achievements unlocked by this very request.
+      gam.achievementDates = { ...(gam.achievementDates || {}), ...newDates }
     }
 
     return {
@@ -102,38 +104,48 @@ export async function getGamificationData(uid: string): Promise<GamificationResp
   }
 }
 
-export async function addXP(uid: string, points: number, reason: string): Promise<void> {
-  try {
-    const ref = db.collection('users').doc(uid).collection('gamification').doc('stats')
-    const updates: any = {
-      xp: FieldValue.increment(points),
-      lastActivity: new Date().toISOString(),
-    }
-    if (reason === 'quiz_correct') updates.quizCount = FieldValue.increment(1)
-    await ref.set(updates, { merge: true })
-  } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : err, uid, reason }, 'addXP failed (non-critical)')
-  }
+/** XP for the first activity of each day. */
+export const DAILY_STREAK_XP = 20
+
+export interface ActivityInput {
+  /** XP earned by this action (e.g. 5 for an explanation, 10 for a correct quiz answer). */
+  xp?: number
+  /** A quiz question answered correctly (counts towards the First Step achievement). */
+  quizCorrect?: boolean
 }
 
-export async function updateStreak(uid: string): Promise<void> {
+const utcDay = (d: Date) => d.toISOString().slice(0, 10)
+
+/**
+ * Record one study action: its XP, the quiz count, and the daily streak, in a single transaction.
+ *
+ * Replaces addXP + updateStreak, which read-then-wrote the stats doc separately: two requests at
+ * the start of a day both saw "not active today" and each granted the streak bonus. Callers await
+ * this before responding so the write is not lost when the runtime throttles CPU after a response.
+ * Best-effort: failures are logged, never thrown, so gamification cannot fail a study request.
+ * Days are UTC.
+ */
+export async function recordActivity(uid: string, { xp = 0, quizCorrect = false }: ActivityInput = {}, now: Date = new Date()): Promise<void> {
   try {
     const ref = db.collection('users').doc(uid).collection('gamification').doc('stats')
-    const snap = await ref.get()
-    const current = snap.exists ? (snap.data() as any) : {}
-    const today = new Date().toISOString().slice(0, 10)
-    if (current.lastActivityDate === today) return
+    await db.runTransaction(async (txn) => {
+      const snap = await txn.get(ref)
+      const current = snap.exists ? (snap.data() as any) : {}
+      const today = utcDay(now)
+      const yesterday = utcDay(new Date(now.getTime() - 86_400_000))
+      const firstToday = current.lastActivityDate !== today
 
-    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
-    const newStreak = current.lastActivityDate === yesterday ? (current.streak || 0) + 1 : 1
-    // Merge streak update + daily XP bonus in one write (avoids the addXP round-trip).
-    await ref.set({
-      lastActivityDate: today,
-      streak: newStreak,
-      xp: FieldValue.increment(20),
-      lastActivity: new Date().toISOString(),
-    }, { merge: true })
+      const updates: Record<string, unknown> = { lastActivity: now.toISOString() }
+      const points = xp + (firstToday ? DAILY_STREAK_XP : 0)
+      if (points > 0) updates.xp = FieldValue.increment(points)
+      if (quizCorrect) updates.quizCount = FieldValue.increment(1)
+      if (firstToday) {
+        updates.lastActivityDate = today
+        updates.streak = current.lastActivityDate === yesterday ? (current.streak || 0) + 1 : 1
+      }
+      txn.set(ref, updates, { merge: true })
+    })
   } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : err, uid }, 'updateStreak failed (non-critical)')
+    logger.warn({ err: err instanceof Error ? err.message : err, uid }, 'recordActivity failed (non-critical)')
   }
 }

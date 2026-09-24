@@ -7,7 +7,7 @@ import { extractTextFromBase64 } from "../services/ocr";
 import { requireFirebaseAuth } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { analyzeSchema } from "../schemas";
-import { addXP, updateStreak } from "../services/gamification";
+import { recordActivity } from "../services/gamification";
 import { logger } from "../logger";
 import { shouldUseCourseRag } from "../services/ragPolicy";
 import { recordQuestionInteraction, formatContext, sourcesFrom } from "../services/interactions";
@@ -57,8 +57,7 @@ analyzeRouter.post("/", requireFirebaseAuth, validate(analyzeSchema), async (req
       },
     });
 
-    addXP(uid, 5, 'explain').catch((err) => logger.warn({ err, uid }, 'addXP failed'));
-    updateStreak(uid).catch((err) => logger.warn({ err, uid }, 'updateStreak failed'));
+    await recordActivity(uid, { xp: 5 });
 
     res.json({
       question: text,

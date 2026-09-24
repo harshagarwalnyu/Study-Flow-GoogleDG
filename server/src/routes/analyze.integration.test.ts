@@ -9,8 +9,7 @@ const {
   mockSaveInteraction, 
   mockEnsureUserDoc,
   mockExtractOCR,
-  mockAddXP,
-  mockUpdateStreak
+  mockRecordActivity,
 } = vi.hoisted(() => ({
   mockExplain: vi.fn(),
   mockClassify: vi.fn(),
@@ -19,8 +18,7 @@ const {
   mockSaveInteraction: vi.fn().mockResolvedValue("event-id"),
   mockEnsureUserDoc: vi.fn().mockResolvedValue(undefined),
   mockExtractOCR: vi.fn(),
-  mockAddXP: vi.fn().mockResolvedValue(undefined),
-  mockUpdateStreak: vi.fn().mockResolvedValue(undefined),
+  mockRecordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Mock services
@@ -48,7 +46,7 @@ vi.mock("../services/firestore", () => ({
   ensureUserDoc: mockEnsureUserDoc,
 }));
 vi.mock("../services/ocr", () => ({ extractTextFromBase64: mockExtractOCR }));
-vi.mock("../services/gamification", () => ({ addXP: mockAddXP, updateStreak: mockUpdateStreak }));
+vi.mock("../services/gamification", () => ({ recordActivity: mockRecordActivity }));
 vi.mock("../services/cache", () => ({ cacheInvalidate: vi.fn() }));
 
 // Mock foundational layers
@@ -96,6 +94,8 @@ describe("Analyze API Integration", () => {
     expect(res.body.solution).toBe("explanation");
     expect(mockSaveInteraction).toHaveBeenCalled();
     expect(mockRecordInteraction).toHaveBeenCalled();
+    // Awaited before responding, not fire-and-forget.
+    expect(mockRecordActivity).toHaveBeenCalledWith("user123", { xp: 5 });
   });
 
   it("personalizes, reuses existing concepts, and does not grade a question as right or wrong", async () => {

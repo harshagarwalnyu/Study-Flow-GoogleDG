@@ -18,7 +18,7 @@ vi.mock("../ai/index", () => ({
 // Mock services
 vi.mock("../services/gamification", () => ({
   getGamificationData: vi.fn().mockResolvedValue({ xp: 100 }),
-  updateStreak: vi.fn().mockResolvedValue(undefined),
+  recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../middleware/rateLimit", () => ({ apiLimiter: (req: any, res: any, next: any) => next() }));
@@ -31,7 +31,7 @@ vi.mock("../middleware/auth", () => ({
 
 import request from "supertest";
 const { app } = await import("../app");
-const { getGamificationData, updateStreak } = await import("../services/gamification");
+const { getGamificationData, recordActivity } = await import("../services/gamification");
 
 describe("Gamification API Integration", () => {
   it("GET /api/v1/gamification returns stats", async () => {
@@ -41,7 +41,8 @@ describe("Gamification API Integration", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.xp).toBe(100);
-    expect(updateStreak).toHaveBeenCalledWith("user123");
+    // Viewing the dashboard is not study activity.
+    expect(recordActivity).not.toHaveBeenCalled();
   });
 
   it("handles errors gracefully", async () => {
@@ -51,14 +52,5 @@ describe("Gamification API Integration", () => {
       .set("Authorization", "Bearer valid");
 
     expect(res.status).toBe(500);
-  });
-
-  it("handles streak update failure silently", async () => {
-    vi.mocked(updateStreak).mockRejectedValueOnce(new Error("streak fail"));
-    const res = await request(app)
-      .get("/api/v1/gamification")
-      .set("Authorization", "Bearer valid");
-
-    expect(res.status).toBe(200);
   });
 });

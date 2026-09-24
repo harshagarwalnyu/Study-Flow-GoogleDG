@@ -9,7 +9,7 @@ import { requireFirebaseAuth } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { quizGenerateSchema, quizAnswerSchema } from "../schemas";
 import { cacheInvalidate } from "../services/cache";
-import { addXP, updateStreak } from "../services/gamification";
+import { recordActivity } from "../services/gamification";
 import { logger } from "../logger";
 import { resolveConceptNodes, toSnakeCase } from "../services/concepts";
 
@@ -161,10 +161,7 @@ quizRouter.post("/answer", requireFirebaseAuth, validate(quizAnswerSchema), asyn
       },
     });
 
-    if (isCorrect) {
-      addXP(uid, 10, 'quiz_correct').catch((err) => logger.warn({ err, uid }, 'addXP failed'))
-    }
-    updateStreak(uid).catch((err) => logger.warn({ err, uid }, 'updateStreak failed'))
+    await recordActivity(uid, isCorrect ? { xp: 10, quizCorrect: true } : {});
 
     res.json({ isCorrect, correctAnswer: storedQuestion.answer, eventId });
   } catch (err) {

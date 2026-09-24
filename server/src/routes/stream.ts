@@ -5,7 +5,7 @@ import { validate } from '../middleware/validate'
 import { explainConceptStream } from '../services/gemini'
 import { retrieveChunks } from '../services/rag'
 import { getStudentProfile } from '../services/misconception'
-import { addXP, updateStreak } from '../services/gamification'
+import { recordActivity } from '../services/gamification'
 import { logger } from '../logger'
 import { shouldUseCourseRag } from '../services/ragPolicy'
 import { recordQuestionInteraction } from '../services/interactions'
@@ -68,20 +68,21 @@ router.post('/explain', requireFirebaseAuth, validate(schema), async (req: Reque
     } catch { /* headers already sent */ }
   } finally {
     clearInterval(heartbeat)
-    res.end()
 
+    // The client already has [DONE]; finish the writes before closing so they are not lost when
+    // the runtime throttles CPU after the response ends.
     if (fullAnswer.trim()) {
-      recordQuestionInteraction(uid, {
-        question,
-        solution: fullAnswer,
-        courseId,
-        response: { solution: fullAnswer },
-      })
-        .catch((err) => logger.warn({ err, uid }, 'stream side-effects failed'))
-
-      addXP(uid, 5, 'explain').catch((err) => logger.warn({ err, uid }, 'stream addXP failed'))
-      updateStreak(uid).catch((err) => logger.warn({ err, uid }, 'stream updateStreak failed'))
+      await Promise.allSettled([
+        recordQuestionInteraction(uid, {
+          question,
+          solution: fullAnswer,
+          courseId,
+          response: { solution: fullAnswer },
+        }).catch((err) => logger.warn({ err, uid }, 'stream side-effects failed')),
+        recordActivity(uid, { xp: 5 }),
+      ])
     }
+    res.end()
   }
 })
 
