@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtBK83nMLM8Exlgt0zdMHi1MrOL84I6XvAVAlD9IkXIKSQ2zAjqyTkI3V8fJKq/12qpRpuZkGIjY3P5+3xs/TWqB9P2XTh81yo+qsDy80Adct8EznFCMQT1JUVWKDyAKJaefaX98PdgrFj1mmhcU1rn6gpYSz8nWtmZVPkFW0Dwnz9GvfCa4/gZV0rfYTii04hfde0SCApacnIHY0uyQT/XY8HD80p4cdMHM7ikNmJx7rPpMQ0AkR3lDpsWK4hh4f56bAQFVKh3s7vWs5mb3CRl81Ai4zFq3ZYvh4jWRX5QRUavXLFtWqNEXtClmpZ7+sUTbLB3Gy5SWyqtC1n0FPfwIDAQAB",
+  "name": "Study Flow AI Companion",
+  "version": "1.0.0",
+  "description": "Your AI-powered study companion that understands what you are learning.",
+  "action": {
+    "default_title": "Open Study Flow"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "icons": {
+    "16": "favicon.svg",
+    "48": "favicon.svg",
+    "128": "favicon.svg"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "alarms", "tabs"],
+  "externally_connectable": {
+    "matches": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"]
+  },
+  "host_permissions": [
+    "<all_urls>",
+    "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*",
+    "http://localhost:4001/*",
+    "http://127.0.0.1:4001/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}
