@@ -14,6 +14,11 @@ export function parsePositiveInt(input: unknown, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+export function parsePositiveFloat(input: unknown, fallback: number): number {
+  const parsed = Number.parseFloat(String(input ?? ""));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const sharedEnv = parseServerEnvironment(process.env);
 
 export const env = {
@@ -22,6 +27,9 @@ export const env = {
   geminiApiKey: sharedEnv.GEMINI_API_KEY,
   geminiModel: sharedEnv.GEMINI_MODEL,
   geminiFastModel: sharedEnv.GEMINI_FAST_MODEL,
+  geminiEmbeddingModel: sharedEnv.GEMINI_EMBEDDING_MODEL,
+  // Cosine distance cutoff for RAG (distance = 1 - similarity). Tune with `bun run --cwd server eval`.
+  ragMaxCosineDistance: parsePositiveFloat(process.env.RAG_MAX_COSINE_DISTANCE, 0.6),
   graphifyEnabled: parseBoolean(process.env.GRAPHIFY_ENABLED, true),
   graphifyQuestionTokens: parsePositiveInt(process.env.GRAPHIFY_QUESTION_MAX_TOKENS, 220),
   graphifyContextTokens: parsePositiveInt(process.env.GRAPHIFY_CONTEXT_MAX_TOKENS, 1200),

@@ -1,85 +1,108 @@
-import { embed } from "./embeddings";
+import { embedQuery, currentEmbeddingModel } from "./embeddings";
 import { db } from "../db/firebase";
+import { env } from "../env";
+import { logger } from "../logger";
 
 const TOP_K = 5;
+// Over-fetch so dropping chunks embedded by a different model still leaves TOP_K candidates.
+const CANDIDATE_MULTIPLIER = 2;
 
-/**
- * Compute cosine similarity between two vectors.
- */
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0, magA = 0, magB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    magA += a[i] * a[i];
-    magB += b[i] * b[i];
-  }
-  const denominator = Math.sqrt(magA) * Math.sqrt(magB);
-  return denominator === 0 ? 0 : dot / denominator;
-}
-
-interface ChunkData {
+export interface RetrievedChunk {
   content: string;
-  embedding?: number[] | { toArray(): number[] };
+  courseId: string;
+  /** Cosine distance (0 = identical, 2 = opposite). */
+  distance: number;
+  filename?: string;
+  chunkIndex?: number;
 }
 
-/**
- * Retrieve the top-K most relevant course chunks for a query using Firestore vector search.
- */
-export async function retrieveChunks(uid: string, courseId: string | undefined, question: string): Promise<string[]> {
-  const queryVector = await embed(question);
-  if (!queryVector) return [];
-
-  // Try Firestore native vector search (findNearest) first
-  if (courseId) {
-    const chunksRef = db.collection("users").doc(uid)
-      .collection("courses").doc(courseId)
-      .collection("chunks");
-
-    const snap = await (chunksRef as any)
-      .findNearest("embedding", queryVector, { limit: TOP_K, distanceMeasure: "COSINE" })
-      .get();
-
-    return snap.docs.map((doc: any) => doc.data().content as string);
-  } else {
-    // Search across all courses
-    const coursesSnap = await db.collection("users").doc(uid)
-      .collection("courses").get();
-
-    const courseSnaps = await Promise.all(
-      coursesSnap.docs.map((courseDoc) => courseDoc.ref.collection("chunks").get())
-    );
-
-    const allChunks: { content: string; similarity: number }[] = [];
-    for (const snap of courseSnaps) {
-      for (const chunkDoc of snap.docs) {
-        const data = chunkDoc.data() as ChunkData;
-        if (data.embedding && data.content) {
-          const vec = typeof (data.embedding as any).toArray === "function" 
-            ? (data.embedding as any).toArray() 
-            : (data.embedding as number[]);
-          allChunks.push({
-            content: data.content,
-            similarity: cosineSimilarity(queryVector, vec),
-          });
-        }
-      }
-    }
-
-    allChunks.sort((a, b) => b.similarity - a.similarity);
-    return allChunks.slice(0, TOP_K).map((c) => c.content);
-  }
+interface ChunkDoc {
+  content?: string;
+  embeddingModel?: string;
+  metadata?: { filename?: string };
+  chunkIndex?: number;
+  _distance?: number;
 }
 
-/**
- * Retrieve Gemini File API URIs for a course, so they can be attached as context.
- */
-export async function getCourseFileURIs(uid: string, courseId: string): Promise<string[]> {
-  const filesRef = db.collection("users").doc(uid)
+async function nearestInCourse(
+  uid: string,
+  courseId: string,
+  queryVector: number[],
+  embeddingModel: string,
+): Promise<{ chunks: RetrievedChunk[]; staleModelHits: number }> {
+  const chunksRef = db.collection("users").doc(uid)
     .collection("courses").doc(courseId)
-    .collection("files");
+    .collection("chunks");
 
-  const snap = await filesRef.get();
-  return snap.docs
-    .map((doc) => doc.data().geminiFileUri as string)
-    .filter((uri) => uri && !uri.startsWith("local://"));
+  const snap = await (chunksRef as any)
+    .findNearest({
+      vectorField: "embedding",
+      queryVector,
+      limit: TOP_K * CANDIDATE_MULTIPLIER,
+      distanceMeasure: "COSINE",
+      distanceResultField: "_distance",
+      distanceThreshold: env.ragMaxCosineDistance,
+    })
+    .get();
+
+  let staleModelHits = 0;
+  const chunks: RetrievedChunk[] = [];
+  for (const doc of snap.docs) {
+    const data = doc.data() as ChunkDoc;
+    if (!data.content) continue;
+    // Vectors from another model live in an unrelated space; their distances are meaningless.
+    if (data.embeddingModel !== embeddingModel) {
+      staleModelHits++;
+      continue;
+    }
+    chunks.push({
+      content: data.content,
+      courseId,
+      distance: typeof data._distance === "number" ? data._distance : 0,
+      filename: data.metadata?.filename,
+      chunkIndex: data.chunkIndex,
+    });
+  }
+  return { chunks, staleModelHits };
+}
+
+/**
+ * Retrieve the top-K most relevant chunks, with source metadata, using Firestore vector search.
+ * Without a courseId, every course is searched with its own indexed query and results are
+ * merged by distance — no chunk collection is ever scanned in-process.
+ */
+export async function retrieveChunkRecords(uid: string, courseId: string | undefined, question: string): Promise<RetrievedChunk[]> {
+  const queryVector = await embedQuery(question);
+  const embeddingModel = currentEmbeddingModel();
+
+  let courseIds: string[];
+  if (courseId) {
+    courseIds = [courseId];
+  } else {
+    const coursesSnap = await db.collection("users").doc(uid).collection("courses").select().get();
+    courseIds = coursesSnap.docs.map((d) => d.id);
+  }
+  if (courseIds.length === 0) return [];
+
+  const results = await Promise.all(
+    courseIds.map((id) => nearestInCourse(uid, id, queryVector, embeddingModel)),
+  );
+
+  const staleModelHits = results.reduce((n, r) => n + r.staleModelHits, 0);
+  if (staleModelHits > 0) {
+    logger.warn(
+      { uid, courseIds, staleModelHits, embeddingModel },
+      "Skipped chunks embedded with a different model; run `bun run --cwd server reembed` to migrate them",
+    );
+  }
+
+  return results
+    .flatMap((r) => r.chunks)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, TOP_K);
+}
+
+/** Content-only view used by prompts that do not cite sources. */
+export async function retrieveChunks(uid: string, courseId: string | undefined, question: string): Promise<string[]> {
+  return (await retrieveChunkRecords(uid, courseId, question)).map((c) => c.content);
 }

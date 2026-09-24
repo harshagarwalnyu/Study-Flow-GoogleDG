@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { chunkText, ingestText, uploadToGeminiFileAPI, ingestFile } from "./ingestion";
+import { chunkText, ingestText, ingestFile, sourceKeyFor, recordIngestedFile } from "./ingestion";
 
 const { mockDb, mockBatch, mockFieldValue } = vi.hoisted(() => {
   const mock = {
@@ -20,6 +20,7 @@ const { mockDb, mockBatch, mockFieldValue } = vi.hoisted(() => {
 
   const mockBatch = {
     set: vi.fn(),
+    delete: vi.fn(),
     commit: vi.fn().mockResolvedValue(true),
   };
   mock.batch.mockReturnValue(mockBatch);
@@ -37,8 +38,12 @@ const { mockDb, mockBatch, mockFieldValue } = vi.hoisted(() => {
 vi.mock("../db/firebase.ts", () => ({ db: mockDb }));
 vi.mock("firebase-admin/firestore", () => ({ FieldValue: mockFieldValue }));
 
-const { mockEmbedBatch } = vi.hoisted(() => ({ mockEmbedBatch: vi.fn() }));
-vi.mock("./embeddings.ts", () => ({ embedBatch: mockEmbedBatch }));
+const { mockEmbedDocuments } = vi.hoisted(() => ({ mockEmbedDocuments: vi.fn() }));
+vi.mock("./embeddings.ts", () => ({
+  embedDocuments: mockEmbedDocuments,
+  currentEmbeddingModel: () => "gemini-embedding-2",
+  EMBEDDING_DIM: 768,
+}));
 
 const { mockExtractText, mockExtractTextFromPDF } = vi.hoisted(() => ({
   mockExtractText: vi.fn(),
@@ -49,23 +54,30 @@ vi.mock("./ocr.ts", () => ({
   extractTextFromPDF: mockExtractTextFromPDF,
 }));
 
-const { mockUploadFile } = vi.hoisted(() => ({ mockUploadFile: vi.fn() }));
-vi.mock("../ai/index.ts", () => ({
-  getAiProvider: vi.fn(() => ({ uploadFile: mockUploadFile })),
+const { mockDiscoverConcepts, mockInitializeConcepts } = vi.hoisted(() => ({
+  mockDiscoverConcepts: vi.fn(),
+  mockInitializeConcepts: vi.fn(),
 }));
+vi.mock("./gemini.ts", () => ({ discoverConcepts: mockDiscoverConcepts }));
+vi.mock("./misconception.ts", () => ({ initializeConcepts: mockInitializeConcepts }));
 
 vi.mock("node:fs/promises", () => ({
   readFile: vi.fn().mockResolvedValue("mock file content"),
 }));
 
+const vectorsFor = (n: number) => Array.from({ length: n }, (_, i) => [i / 10]);
+
 describe("ingestion service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Re-initialize recursive mocks
     mockDb.collection.mockReturnValue(mockDb);
     mockDb.doc.mockReturnValue(mockDb);
     mockDb.where.mockReturnValue(mockDb);
     mockDb.count.mockReturnValue(mockDb);
+    mockDb.get.mockResolvedValue({ docs: [] });
+    mockEmbedDocuments.mockImplementation(async (texts: string[]) => vectorsFor(texts.length));
+    mockDiscoverConcepts.mockResolvedValue({ concepts: ["limits"] });
+    mockInitializeConcepts.mockResolvedValue(undefined);
   });
 
   describe("chunkText", () => {
@@ -74,97 +86,125 @@ describe("ingestion service", () => {
     });
 
     it("splits long text into chunks", () => {
-      const chunks = chunkText("A".repeat(1200));
-      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunkText("A".repeat(1200)).length).toBeGreaterThan(1);
     });
 
     it("breaks at sentence boundaries", () => {
-      // CHUNK_SIZE is 500. 0.6 * 500 = 300.
-      // Need a sentence boundary after 300 chars but before 500.
       const text = "A".repeat(350) + ". " + "B".repeat(1000);
-      const chunks = chunkText(text);
-      expect(chunks[0]).toBe("A".repeat(350) + ".");
+      expect(chunkText(text)[0]).toBe("A".repeat(350) + ".");
+    });
+
+    it("does not emit a redundant tail chunk that is a suffix of the previous one", () => {
+      const chunks = chunkText("A".repeat(1100));
+      // 0-500, 450-950, 900-1100 — and nothing after the chunk that reaches the end.
+      expect(chunks.map((c) => c.length)).toEqual([500, 500, 200]);
+    });
+
+    it("emits a single chunk for short text", () => {
+      expect(chunkText("short text.")).toEqual(["short text."]);
+    });
+  });
+
+  describe("sourceKeyFor", () => {
+    it("keys named files by filename", () => {
+      expect(sourceKeyFor("anything", "notes.pdf")).toBe("file:notes.pdf");
+    });
+
+    it("keys unnamed captures by content so distinct captures never collide", () => {
+      const a = sourceKeyFor("page one");
+      const b = sourceKeyFor("page two");
+      expect(a).toMatch(/^hash:[0-9a-f]{64}$/);
+      expect(a).not.toBe(b);
+      expect(sourceKeyFor("page one", "content-script-capture")).toBe(a);
     });
   });
 
   describe("ingestText", () => {
-    it("chunks, embeds and stores text", async () => {
-      mockEmbedBatch.mockResolvedValue([[0.1], [0.2], [0.3]]);
-      await ingestText("uid1", "course1", "A".repeat(1100));
+    it("stores one vector per chunk, aligned by index, tagged with model and source", async () => {
+      const n = await ingestText("uid1", "course1", "A".repeat(1100), { filename: "w1.pdf" });
 
-      expect(mockEmbedBatch).toHaveBeenCalled();
-      expect(mockBatch.set).toHaveBeenCalledTimes(3); // 3 chunks
-      expect(mockDb.set).toHaveBeenCalledTimes(1); // 1 course doc
-      expect(mockBatch.commit).toHaveBeenCalled();
+      expect(n).toBe(3);
+      expect(mockEmbedDocuments).toHaveBeenCalledWith(expect.any(Array), "w1.pdf");
+      expect(mockBatch.set).toHaveBeenCalledTimes(3);
+      mockBatch.set.mock.calls.forEach(([, data], i) => {
+        expect(data).toMatchObject({
+          chunkIndex: i,
+          embedding: [i / 10],
+          embeddingModel: "gemini-embedding-2",
+          embeddingDim: 768,
+          sourceKey: "file:w1.pdf",
+        });
+      });
+      expect(mockDb.set).toHaveBeenCalledTimes(1); // course doc
     });
 
-    it("commits early if batch is large", async () => {
-      mockEmbedBatch.mockResolvedValue(new Array(500).fill([0.1]));
-      // Each chunk is roughly CHUNK_SIZE (500). 10000 / 500 = 20 chunks.
-      // Wait, 400 is the limit in ingest.js. I'll make it 401 chunks.
-      mockEmbedBatch.mockResolvedValue(new Array(401).fill([0.1]));
-      await ingestText("uid1", "course1", "A".repeat(401 * 500));
+    it("replaces chunks previously ingested from the same source", async () => {
+      const staleRefs = [{ ref: "old-1" }, { ref: "old-2" }];
+      mockDb.get.mockResolvedValue({ docs: staleRefs });
+
+      await ingestText("uid1", "course1", "hello world.", { filename: "w1.pdf" });
+
+      expect(mockDb.where).toHaveBeenCalledWith("sourceKey", "==", "file:w1.pdf");
+      expect(mockBatch.delete).toHaveBeenCalledWith("old-1");
+      expect(mockBatch.delete).toHaveBeenCalledWith("old-2");
+      expect(mockBatch.set).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not touch Firestore when embedding fails", async () => {
+      mockEmbedDocuments.mockRejectedValue(new Error("Embedding response mismatch"));
+
+      await expect(ingestText("uid1", "course1", "hello world.")).rejects.toThrow("mismatch");
+      expect(mockBatch.delete).not.toHaveBeenCalled();
+      expect(mockBatch.set).not.toHaveBeenCalled();
+      expect(mockBatch.commit).not.toHaveBeenCalled();
+    });
+
+    it("commits in batches under the Firestore write limit", async () => {
+      await ingestText("uid1", "course1", "A".repeat(401 * 450 + 50));
       expect(mockBatch.commit).toHaveBeenCalledTimes(2);
     });
 
-    it("returns early if no chunks", async () => {
-      await ingestText("uid1", "course1", "");
-      expect(mockEmbedBatch).not.toHaveBeenCalled();
+    it("returns 0 without embedding when there are no chunks", async () => {
+      expect(await ingestText("uid1", "course1", "")).toBe(0);
+      expect(mockEmbedDocuments).not.toHaveBeenCalled();
     });
   });
 
-  describe("uploadToGeminiFileAPI", () => {
-    it("uploads and stores new file", async () => {
-      mockDb.get.mockResolvedValue({ empty: true });
-      mockUploadFile.mockResolvedValue({ uri: "gemini://file1" });
+  describe("recordIngestedFile", () => {
+    it("upserts a deterministic file record", async () => {
+      await recordIngestedFile("uid1", "course1", { filename: "a.pdf", sourcePlatform: "upload", contentHash: "h", chunkCount: 2 });
+      await recordIngestedFile("uid1", "course1", { filename: "a.pdf", sourcePlatform: "upload", contentHash: "h2", chunkCount: 3 });
 
-      const result = await uploadToGeminiFileAPI("uid1", "course1", "/path/to/file.pdf", "test.pdf", "upload");
-
-      expect(result.fileUri).toBe("gemini://file1");
-      expect(mockUploadFile).toHaveBeenCalledWith(expect.objectContaining({ mimeType: "application/pdf" }));
-    });
-
-    it("returns existing file if duplicate", async () => {
-      const mockSnap = {
-        empty: false,
-        docs: [{ data: () => ({ geminiFileUri: "existing-uri", uploadedAt: new Date() }) }],
-      };
-      mockDb.get.mockResolvedValue(mockSnap);
-
-      const result = await uploadToGeminiFileAPI("uid1", "course1", "/path/to/file.txt", "test.txt", "upload");
-      expect(result.fileUri).toBe("existing-uri");
-      expect(mockUploadFile).not.toHaveBeenCalled();
+      const fileIds = mockDb.doc.mock.calls.map(([id]) => id).filter((id) => typeof id === "string" && id.length === 64);
+      expect(fileIds).toHaveLength(2);
+      expect(fileIds[0]).toBe(fileIds[1]);
+      expect(mockDb.set).toHaveBeenLastCalledWith(
+        expect.objectContaining({ filename: "a.pdf", contentHash: "h2", chunkCount: 3 }),
+        { merge: true },
+      );
     });
   });
 
   describe("ingestFile", () => {
-    it("handles PDF files", async () => {
-      mockExtractTextFromPDF.mockResolvedValue("pdf text");
-      mockEmbedBatch.mockResolvedValue([[0.1]]);
-      mockUploadFile.mockResolvedValue({ uri: "uri" });
-      mockDb.get.mockResolvedValue({ empty: true });
-
+    it("extracts PDFs, ingests, records the file and seeds concepts", async () => {
+      mockExtractTextFromPDF.mockResolvedValue("pdf text.");
       await ingestFile("uid1", "course1", "/test.pdf", "test.pdf");
-      expect(mockExtractTextFromPDF).toHaveBeenCalled();
+
+      expect(mockExtractTextFromPDF).toHaveBeenCalledWith("/test.pdf");
+      expect(mockBatch.set).toHaveBeenCalledTimes(1);
+      expect(mockDb.set).toHaveBeenCalledWith(expect.objectContaining({ filename: "test.pdf", chunkCount: 1 }), { merge: true });
+      expect(mockInitializeConcepts).toHaveBeenCalledWith("uid1", ["limits"], "course1");
     });
 
-    it("handles image files", async () => {
+    it("OCRs images", async () => {
       mockExtractText.mockResolvedValue("image text");
-      mockEmbedBatch.mockResolvedValue([[0.1]]);
-      mockUploadFile.mockResolvedValue({ uri: "uri" });
-      mockDb.get.mockResolvedValue({ empty: true });
-
       await ingestFile("uid1", "course1", "/test.png", "test.png");
-      expect(mockExtractText).toHaveBeenCalled();
+      expect(mockExtractText).toHaveBeenCalledWith("/test.png");
     });
 
-    it("handles other files via readFile", async () => {
-      mockEmbedBatch.mockResolvedValue([[0.1]]);
-      mockUploadFile.mockResolvedValue({ uri: "uri" });
-      mockDb.get.mockResolvedValue({ empty: true });
-
+    it("reads other files as UTF-8 text", async () => {
       await ingestFile("uid1", "course1", "/test.txt", "test.txt");
-      expect(mockEmbedBatch).toHaveBeenCalled();
+      expect(mockEmbedDocuments).toHaveBeenCalledWith(["mock file content"], "test.txt");
     });
   });
 });

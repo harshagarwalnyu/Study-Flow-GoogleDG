@@ -1,11 +1,10 @@
-import { embedBatch } from "./embeddings";
+import { embedDocuments, currentEmbeddingModel, EMBEDDING_DIM } from "./embeddings";
 import { extractText, extractTextFromPDF } from "./ocr";
 import { db } from "../db/firebase";
 import { FieldValue } from "firebase-admin/firestore";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { getAiProvider } from "../ai/index";
 import { discoverConcepts } from "./gemini";
 import { initializeConcepts } from "./misconception";
 
@@ -33,20 +32,28 @@ export function chunkText(text: string): string[] {
       }
     }
     chunks.push(text.slice(start, end).trim());
+    // Stop once the tail is emitted; stepping back by the overlap here would emit a
+    // redundant final chunk that is a strict suffix of the previous one.
+    if (end >= text.length) break;
     start = end - CHUNK_OVERLAP;
   }
   return chunks.filter((c) => c.length > 0);
 }
 
+const DEFAULT_CAPTURE_NAME = "content-script-capture";
+
+function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
 /**
- * Hash a filename + courseId to detect duplicate uploads.
- *
- * @param {string} filename
- * @param {string} courseId
- * @returns {string}
+ * Identity of an ingested source. Re-ingesting the same named file replaces its chunks;
+ * unnamed page captures are keyed by content so identical captures are not duplicated
+ * and distinct captures never overwrite each other.
  */
-function fileHash(filename: string, courseId: string): string {
-  return createHash("sha256").update(`${courseId}:${filename}`).digest("hex");
+export function sourceKeyFor(text: string, filename?: string): string {
+  if (filename && filename !== DEFAULT_CAPTURE_NAME) return `file:${filename}`;
+  return `hash:${sha256(text)}`;
 }
 
 interface IngestMetadata {
@@ -56,46 +63,56 @@ interface IngestMetadata {
   filename?: string;
 }
 
+const WRITE_BATCH_LIMIT = 400;
+
 /**
  * Ingest a plain-text string: chunk it, embed all chunks, and store in Firestore.
  * Chunks are stored at users/{uid}/courses/{courseId}/chunks/{auto-id}.
+ * Prior chunks from the same source are deleted so re-ingesting never duplicates.
  *
- * @param {string} uid
- * @param {string} courseId
- * @param {string} text
- * @param {object} metadata - { source, page, week, filename }
+ * @returns number of chunks written
  */
-export async function ingestText(uid: string, courseId: string, text: string, metadata: IngestMetadata = {}): Promise<void> {
+export async function ingestText(uid: string, courseId: string, text: string, metadata: IngestMetadata = {}): Promise<number> {
   const chunks = chunkText(text);
-  if (chunks.length === 0) return;
+  if (chunks.length === 0) return 0;
 
-  // Batch embed all chunks
-  const vectors = await embedBatch(chunks);
+  const sourceKey = sourceKeyFor(text, metadata.filename);
+  // Embed before touching Firestore: a failed embedding call must not leave the source half-replaced.
+  const vectors = await embedDocuments(chunks, metadata.filename);
+  const embeddingModel = currentEmbeddingModel();
 
-  // Write chunks to Firestore in batched writes (max 500 per batch)
-  const chunksRef = db.collection("users").doc(uid)
-    .collection("courses").doc(courseId)
-    .collection("chunks");
+  const courseRef = db.collection("users").doc(uid).collection("courses").doc(courseId);
+  const chunksRef = courseRef.collection("chunks");
+
+  const stale = await chunksRef.where("sourceKey", "==", sourceKey).get();
 
   let batch = db.batch();
   let batchCount = 0;
-
-  for (let i = 0; i < chunks.length; i++) {
-    const ref = chunksRef.doc();
-    batch.set(ref, {
-      content: chunks[i],
-      embedding: FieldValue.vector(vectors[i]),
-      metadata,
-      chunkIndex: i,
-      createdAt: FieldValue.serverTimestamp(),
-    });
-    batchCount++;
-
-    if (batchCount >= 400) {
+  const flushIfFull = async () => {
+    if (++batchCount >= WRITE_BATCH_LIMIT) {
       await batch.commit();
       batch = db.batch();
       batchCount = 0;
     }
+  };
+
+  for (const doc of stale.docs) {
+    batch.delete(doc.ref);
+    await flushIfFull();
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    batch.set(chunksRef.doc(), {
+      content: chunks[i],
+      embedding: FieldValue.vector(vectors[i]),
+      embeddingModel,
+      embeddingDim: EMBEDDING_DIM,
+      sourceKey,
+      metadata,
+      chunkIndex: i,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await flushIfFull();
   }
 
   if (batchCount > 0) {
@@ -103,87 +120,41 @@ export async function ingestText(uid: string, courseId: string, text: string, me
   }
 
   // Ensure course doc exists so it shows up in the courses list
-  const courseRef = db.collection("users").doc(uid)
-    .collection("courses").doc(courseId);
   await courseRef.set({
     lastIngestedAt: FieldValue.serverTimestamp(),
     platform: metadata.source || "content-script",
   }, { merge: true });
+
+  return chunks.length;
 }
 
 /**
- * Upload a document to the Gemini File API and store the URI in Firestore.
- * Per the design doc, file URIs are attached to every LLM prompt for that course.
- *
- * @param {string} uid
- * @param {string} courseId
- * @param {string} filePath - Path to the file on disk
- * @param {string} filename - Original filename
- * @param {string} sourcePlatform - "brightspace" | "gradescope" | "upload"
- * @returns {Promise<{ fileUri: string, ingestedAt: Date | any }>}
+ * Upsert the file record shown in the course view (routes/course.ts lists these).
+ * Keyed by courseId+filename so a re-upload updates the record instead of adding one.
  */
-export async function uploadToGeminiFileAPI(uid: string, courseId: string, filePath: string, filename: string, sourcePlatform: string): Promise<{ fileUri: string, ingestedAt: Date | any }> {
-  const hash = fileHash(filename, courseId);
-
-  // Check for duplicate
-  const filesRef = db.collection("users").doc(uid)
+export async function recordIngestedFile(
+  uid: string,
+  courseId: string,
+  { filename, sourcePlatform, contentHash, chunkCount }: { filename: string; sourcePlatform: string; contentHash: string; chunkCount: number },
+): Promise<void> {
+  const fileId = sha256(`${courseId}:${filename}`);
+  await db.collection("users").doc(uid)
     .collection("courses").doc(courseId)
-    .collection("files");
-
-  const existing = await filesRef.where("fileHash", "==", hash).get();
-  if (!existing.empty) {
-    const doc = existing.docs[0].data();
-    return { fileUri: doc.geminiFileUri, ingestedAt: doc.uploadedAt };
-  }
-
-  // Upload to Gemini File API via @google/genai
-  const ext = path.extname(filename).toLowerCase();
-  const mimeTypes: Record<string, string> = {
-    ".pdf": "application/pdf",
-    ".txt": "text/plain",
-    ".html": "text/html",
-    ".htm": "text/html",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-  };
-
-  const uploaded = await getAiProvider().uploadFile({
-    filePath,
-    displayName: filename,
-    mimeType: mimeTypes[ext] || "application/octet-stream",
-  });
-  const geminiFileUri = (uploaded as any).uri;
-
-  // Store file record in Firestore
-  await filesRef.add({
-    geminiFileUri,
-    filename,
-    fileHash: hash,
-    sourcePlatform,
-    uploadedAt: FieldValue.serverTimestamp(),
-  });
-
-  // Also ensure course doc exists
-  const courseRef = db.collection("users").doc(uid)
-    .collection("courses").doc(courseId);
-  await courseRef.set({
-    lastIngestedAt: FieldValue.serverTimestamp(),
-    platform: sourcePlatform,
-  }, { merge: true });
-
-  return { fileUri: geminiFileUri, ingestedAt: new Date() };
+    .collection("files").doc(fileId)
+    .set({
+      filename,
+      sourcePlatform,
+      contentHash,
+      chunkCount,
+      uploadedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
 }
 
 /**
  * Read a file from disk, extract text, then ingest via chunking + embedding.
- * Also uploads to Gemini File API for direct file context.
  *
- * @param {string} uid
- * @param {string} courseId
- * @param {string} filePath - Absolute path to the uploaded file
- * @param {string} filename - Original filename
- * @param {string} sourcePlatform
+ * Files are not uploaded to the Gemini File API: those uploads expire after 48 hours and
+ * no prompt ever consumed the stored URIs, so the upload only added latency and a failure mode.
  */
 export async function ingestFile(uid: string, courseId: string, filePath: string, filename: string, sourcePlatform: string = "upload"): Promise<void> {
   const ext = path.extname(filename).toLowerCase();
@@ -197,12 +168,13 @@ export async function ingestFile(uid: string, courseId: string, filePath: string
     text = await readFile(filePath, "utf-8");
   }
 
-  // Run in parallel: chunk+embed, upload to Gemini, and discover concepts for initial graph population
-  const { concepts } = await discoverConcepts(text);
+  const [{ concepts }, chunkCount] = await Promise.all([
+    discoverConcepts(text),
+    ingestText(uid, courseId, text, { filename, source: sourcePlatform }),
+  ]);
 
   await Promise.all([
-    ingestText(uid, courseId, text, { filename, source: sourcePlatform }),
-    uploadToGeminiFileAPI(uid, courseId, filePath, filename, sourcePlatform),
+    recordIngestedFile(uid, courseId, { filename, sourcePlatform, contentHash: sha256(text), chunkCount }),
     initializeConcepts(uid, concepts, courseId),
   ]);
 }

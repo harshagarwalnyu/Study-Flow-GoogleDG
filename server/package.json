@@ -9,7 +9,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "start": "bun src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "reembed": "bun src/scripts/reembed.ts"
   },
   "dependencies": {
     "@axiomhq/js": "^1.6.0",
