@@ -1,4 +1,4 @@
-import rateLimit, { type Store } from "express-rate-limit";
+import rateLimit, { ipKeyGenerator, type Store } from "express-rate-limit";
 import type { Request } from "express";
 import { env } from "../env";
 import { FirestoreRateLimitStore } from "./firestoreRateLimitStore";
@@ -31,7 +31,10 @@ function aiStore(): Store | undefined {
 export const aiLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: env.rateLimitAiPerMinute,
-  keyGenerator: (req: Request) => req.user?.uid ?? `ip:${req.ip}`,
+  // The IP fallback (unauthenticated misuse) goes through ipKeyGenerator so IPv6 clients are
+  // grouped by /56 subnet and cannot rotate addresses to dodge the limit. Express always sets
+  // req.ip for a socket-backed request.
+  keyGenerator: (req: Request) => req.user?.uid ?? `ip:${ipKeyGenerator(req.ip!)}`,
   store: aiStore(),
   passOnStoreError: true,
   standardHeaders: true,
