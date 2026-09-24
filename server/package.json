@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@axiomhq/js": "^1.6.0",
-    "@google-cloud/vision": "^5.3.5",
+    "@google-cloud/vision": "^6.1.0",
     "@google/genai": "^2.24.0",
     "@study-flow/shared": "workspace:*",
     "cors": "^2.8.6",
