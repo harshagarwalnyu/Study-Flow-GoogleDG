@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 
 const { mockDb } = vi.hoisted(() => {
@@ -29,6 +29,13 @@ vi.mock("./middleware/rateLimit", () => ({
 }));
 
 describe("app", () => {
+  // The first import of ./app loads every route plus the Gemini, Vision and Firebase SDKs; under
+  // coverage that cold load can pass the 5s test timeout. Pay it once; each test still re-imports
+  // after vi.resetModules().
+  beforeAll(async () => {
+    await import("./app");
+  }, 30_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockDb.collection.mockReturnValue(mockDb);
