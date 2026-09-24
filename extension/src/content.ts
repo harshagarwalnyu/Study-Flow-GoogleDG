@@ -6,7 +6,7 @@ import {
   detectPdfUrl,
   deriveCourseId,
 } from "./lib/content-runtime";
-import type { ExtensionRuntimeMessage } from "./lib/messages";
+import type { ExtensionRuntimeMessage, SupportedContentPlatform } from "./lib/messages";
 
 (function () {
   // Guard against double-injection
@@ -19,8 +19,10 @@ import type { ExtensionRuntimeMessage } from "./lib/messages";
     return;
   }
 
-  const sourcePlatform = detectSupportedPlatform(window.location.hostname);
-  if (!sourcePlatform) return;
+  const detectedPlatform = detectSupportedPlatform(window.location.hostname);
+  if (!detectedPlatform) return;
+  // Re-bind after the null guard: narrowing does not flow into hoisted function declarations.
+  const sourcePlatform: SupportedContentPlatform = detectedPlatform;
 
   const courseId = deriveCourseId(
     window.location.hostname,

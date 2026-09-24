@@ -1,13 +1,14 @@
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import { getAuth, type Auth } from "firebase/auth";
 
+// Config comes from extension/.env(.local) at build time — never hardcode it here.
 const firebaseConfig = {
-  apiKey: "AIzaSyDUHFxuJt8qyTda9jBVcI5IVajdewV4YyA",
-  authDomain: "gdg-ai-companion.firebaseapp.com",
-  projectId: "gdg-ai-companion",
-  storageBucket: "gdg-ai-companion.firebasestorage.app",
-  messagingSenderId: "966291933098",
-  appId: "1:966291933098:web:757347a5992982d6276189",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || undefined,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || undefined,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || undefined,
 };
 
 function isValidFirebaseValue(value: string | undefined): boolean {
