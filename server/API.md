@@ -11,7 +11,11 @@ Every protected route requires:
 Authorization: Bearer <firebase-id-token>
 ```
 
-Missing or invalid tokens return `401`. All `/api/v1` routes pass through a shared rate limiter before reaching route handlers.
+Missing or invalid tokens return `401`.
+
+**Rate limits** (`429` with `{ "error": "Too many requests …" }` and `RateLimit-*` headers):
+- every `/api/v1` route: per client IP, 120/min (`RATE_LIMIT_IP_PER_MINUTE`; set `TRUST_PROXY` behind a load balancer)
+- Gemini-backed routes (`/analyze`, `/explain`, `/stream/explain`, `POST /quiz`, `/ingest/*`): per user, 20/min (`RATE_LIMIT_AI_PER_MINUTE`); `RATE_LIMIT_STORE=firestore` shares the count across server instances
 
 ## Error Format
 
@@ -72,7 +76,8 @@ At least one of `content` or `imageBase64` must be present; the validate middlew
 | `relevantLecture` | string | Source lecture or topic from course material |
 | `keyFormulas` | string[] | Relevant formulas extracted |
 | `personalizedCallout` | string | Personalized note based on student history |
-| `classifierTag.conceptNode` | string | snake_case concept key used in SMG |
+| `sources` | `{ filename, courseId }[]` | Course files the retrieved context came from, in rank order |
+| `classifierTag.conceptNode` | string | Canonical SMG concept key (merged with an existing node when the label is close) |
 | `classifierTag.errorType` | string | One of `conceptual_misunderstanding`, `procedural_error`, `knowledge_gap`, `reasoning_error`, `none` |
 | `classifierTag.confidence` | number | Classifier confidence, 0–1 |
 | `eventId` | string | Firestore event document ID |
@@ -91,8 +96,7 @@ At least one of `content` or `imageBase64` must be present; the validate middlew
 
 ### `POST /api/v1/explain`
 
-Lightweight explanation only — no SMG update, no gamification, no event saved.  
-Use this for preview or non-tracked explanations. For full tracking, use `POST /api/v1/analyze`.
+Explanation that returns as soon as Gemini answers. The question is then classified, recorded in the SMG and saved as an event in the background (so the response carries no `classifierTag`/`eventId`). No XP. Use `POST /api/v1/analyze` when the caller needs the classification in the response.
 
 **Auth required:** Yes
 
@@ -113,6 +117,7 @@ Use this for preview or non-tracked explanations. For full tracking, use `POST /
 | `relevantLecture` | string | Source lecture or topic |
 | `keyFormulas` | string[] | Relevant formulas extracted |
 | `personalizedCallout` | string | Personalized note |
+| `sources` | `{ filename, courseId }[]` | Course files the retrieved context came from |
 
 **Error codes**
 
@@ -196,7 +201,7 @@ Submit one answer for server-side grading. The server validates the `sessionId`,
 
 ### `GET /api/v1/quiz/queue`
 
-Return the spaced repetition drill queue for the authenticated user, ordered by urgency. Urgency score: `(overdueDays * 2) + ((1 - accuracyRate) * 5)`.
+Return the spaced repetition drill queue for the authenticated user, ordered by urgency: due reviews first (most forgotten first), then new concepts, then reviews not yet due. See `drillPriority` in `src/services/scheduler.ts`.
 
 **Auth required:** Yes
 
@@ -207,6 +212,8 @@ Return the spaced repetition drill queue for the authenticated user, ordered by 
 | `queue` | object[] | Ordered list of concepts due for review |
 | `queue[].conceptNode` | string | snake_case concept key |
 | `queue[].urgency` | number | Higher = more urgent |
+| `queue[].due` | boolean | A review is due now (new concepts are not due) |
+| `queue[].retrievability` | number | FSRS predicted recall now, 0-1 (reviewed concepts only) |
 | `queue[].accuracyRate` | number | 0–1 |
 | `queue[].nextReviewDate` | string (ISO 8601) | Scheduled review date |
 
@@ -227,10 +234,10 @@ Return all SMG nodes for the authenticated user. Cached in-process for 60 second
 | `nodes` | object[] | All concept nodes |
 | `nodes[].conceptNode` | string | snake_case concept key |
 | `nodes[].accuracyRate` | number | 0–1 |
-| `nodes[].easeFactor` | number | SM-2 ease factor |
-| `nodes[].reviewIntervalDays` | number | Current SM-2 interval |
+| `nodes[].errorTypeMap` | object | Count per error type |
+| `nodes[].dominantErrorType` | string \| null | Most frequent error type, excluding `none` |
+| `nodes[].retrievability` | number | FSRS predicted recall now (reviewed concepts only) |
 | `nodes[].nextReviewDate` | string (ISO 8601) | Next scheduled review |
-| `nodes[].errorTypeMap` | object | Counts by error type |
 | `nodes[].interactionCount` | integer | Total interactions recorded |
 
 **Error codes**
@@ -319,7 +326,7 @@ Additional fields from the Firestore course document are included as-is.
 
 ### `POST /api/v1/ingest/upload`
 
-Upload a file (PDF, etc.) for chunking, embedding, and storage in Firestore. File is deleted from the server's temp directory after processing regardless of success or failure. Max file size: 20 MB.
+Upload a file (PDF, etc.) for heading-aware chunking, embedding (`gemini-embedding-2`) and storage in Firestore; re-uploading the same filename replaces its earlier chunks. File is deleted from the server's temp directory after processing regardless of success or failure. Max file size: 20 MB.
 
 **Auth required:** Yes
 
@@ -444,7 +451,7 @@ Track a lightweight client-side action (e.g. `login`, `page_view`). Does not tri
 
 ### `GET /api/v1/gamification`
 
-Return the authenticated user's XP, level, streak, and achievement status. Also runs a streak update on each call.
+Return the authenticated user's XP, level, streak, and achievement status. Read-only: viewing does not count as activity (streaks and XP change only through study actions, recorded in one transaction per action; days are UTC).
 
 **Auth required:** Yes
 
@@ -484,7 +491,7 @@ XP events: `POST /api/v1/analyze` awards 5 XP; a correct `POST /api/v1/quiz/answ
 
 ### `POST /api/v1/stream/explain`
 
-Streaming version of explain. Returns a Server-Sent Events (SSE) stream. RAG context is retrieved before streaming; if RAG fails the stream continues without context.
+Streaming version of explain. Returns a Server-Sent Events (SSE) stream. RAG context is retrieved before streaming; if RAG fails the stream continues without context. After `[DONE]` the server records the interaction in the SMG and awards 5 XP before closing the connection.
 
 **Auth required:** Yes
 

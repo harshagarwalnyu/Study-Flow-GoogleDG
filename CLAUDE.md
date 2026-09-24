@@ -1,119 +1,68 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
 ## Commands
 
-All workspaces use **bun**, not npm. The repo is a bun monorepo with three packages: `server`, `web`, `extension`.
+Bun monorepo, **bun only** (never npm). Workspaces: `server`, `web`, `extension`, `packages/shared` (zod contracts + env schema), `packages/client` (typed API client used by web and extension).
 
 ```bash
-# Install all packages from root
 bun install --frozen-lockfile
-
-# Dev servers
-bun run dev:server       # Express API on :3000 (node --watch)
+bun run dev:server       # Express API on :3000 (bun --watch src/index.ts)
 bun run dev:web          # Vite web app on :5173
 bun run dev:extension    # Vite watch build into extension/dist
-bun run dev:all          # All three concurrently
-
-# Build (web + extension only — server has no build step)
-bun run build
-
-# Lint all packages
-bun run lint
-
-# Server tests (vitest)
-bun run --cwd server test
-bun run --cwd server test -- --reporter=verbose   # with detail
-bun run --cwd server test src/routes/routes.integration.test.js  # single file
+bun run dev:all          # all of the above
+bun run check            # lint + typecheck + tests + build, every workspace — run before committing
+bun run --cwd server test:coverage   # vitest; CI gate is 80% on all four metrics
+bun run --cwd server eval            # retrieval / concept-merge eval (needs GEMINI_API_KEY)
+bun run --cwd server reembed -- --dry-run   # migrate stored vectors to the current embedding model
+bun run --cwd extension test         # bun:test
 ```
 
 Health check: `curl http://localhost:3000/health`
 
-## Environment Variables
+## Environment
 
-`server/.env` (required):
-- `GEMINI_API_KEY` — Gemini API key
-- `GOOGLE_APPLICATION_CREDENTIALS` — path to Firebase service account JSON
-- `FIREBASE_PROJECT_ID`
-- `GEMINI_MODEL` — optional override; defaults to `gemini-3.1-pro-preview`. **Never change the default without web-searching first** — the model list changes faster than training cutoffs.
+`server/.env` (see `server/.env.example`): `GEMINI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `FIREBASE_PROJECT_ID`, `ALLOWED_ORIGINS`. Optional: `GEMINI_MODEL`, `GEMINI_FAST_MODEL`, `GEMINI_EMBEDDING_MODEL`, `RAG_MAX_COSINE_DISTANCE` (0.6), `CONCEPT_MATCH_MAX_DISTANCE` (0.15), `TRUST_PROXY`, `RATE_LIMIT_STORE` (`memory`|`firestore`), `RATE_LIMIT_IP_PER_MINUTE` (120), `RATE_LIMIT_AI_PER_MINUTE` (20).
 
-`web/.env.local` and `extension/.env`: `VITE_FIREBASE_*` keys + `VITE_API_URL`.
+Model defaults live in `packages/shared/src/env/server.ts`: primary `gemini-3.1-pro-preview`, fast `gemini-3.8-flash`, embeddings `gemini-embedding-2` (verified 2026-09-24). **Web-search before changing any model name** — text-embedding-004 and gemini-2.0-flash are already shut down.
+
+`web/.env.local`, `extension/.env`: `VITE_FIREBASE_*` + `VITE_API_URL` (see the `.env.example` files). Never hardcode Firebase config.
 
 ## Architecture
 
-### Three Packages
+**`server/`** — TypeScript, Express 5. `src/index.ts` → `src/app.ts`; routes under `/api/v1` (`src/routes/index.ts`). Gemini access goes through `src/ai/geminiProvider.ts` (model aliases `primary`/`fast`, batching, retry on 429/503). Logging: pino `logger` — never `console.log`.
 
-**`server/`** — Express 5 API, plain JS (no TypeScript). Single entry point `src/index.js` → `src/app.js`. All routes mount under `/api/v1` via `src/routes/index.js`. Auth is Firebase ID token verified by `requireFirebaseAuth` middleware on every protected route.
+**`web/`** — React 19 + Vite + TypeScript. Plain React state + `lib/api.ts` (wraps `@study-flow/client`); auth context in `lib/auth.tsx`. Concept graph is **Cytoscape** (`pages/Dashboard.tsx`): fill = accuracy, border colour + shape = dominant error type.
 
-**`web/`** — TypeScript + React 19 + Vite. Marketing site + auth pages + dashboard. Uses TanStack Query for server state, Zustand for theme persistence, D3 for the concept graph, Radix UI for primitives. The `@` path alias points to `web/src/`.
+**`extension/`** — Chrome MV3, React 19 + Vite (TS + JSX). `src/background.ts` (service worker; drill badge via `chrome.alarms`), `src/content.ts` (Brightspace/Gradescope extraction), `src/sidepanel/` (SPA). Auth: `chrome.identity` → Firebase; token kept in `chrome.storage.session`.
 
-**`extension/`** — Plain JSX + React 19 + Vite, built as Chrome MV3. Two separate entry points: `background.js` (service worker) and `sidepanel/` (React SPA). The extension and web app share no code — they have separate Firebase clients and API wrappers in their respective `lib/` directories.
+### Question pipeline (`/analyze`, `/explain`, `/stream/explain`)
+1. `retrieveChunkRecords` (`services/rag.ts`) — embed query, Firestore `findNearest` per course in parallel (COSINE, distance ≤ `RAG_MAX_COSINE_DISTANCE`).
+2. Explain with the primary model, personalised by `getStudentProfile`; context carries `[n] (from file)` citations and responses return `sources`.
+3. `recordQuestionInteraction` (`services/interactions.ts`) — classify, canonicalise the concept (`services/concepts.ts`: exact id → nearest `smg.labelEmbedding` ≤ 0.15 → new node), `recordInteraction`, save event, invalidate cache. `/explain` does this after responding; the others await it.
+4. `recordActivity` (`services/gamification.ts`) — one awaited transaction for XP, quiz count and UTC streak.
 
-### The Core AI Pipeline (`POST /api/v1/analyze`)
+### SMG + scheduling
+`users/{uid}/smg/{conceptNode}` (snake_case ids). FSRS via ts-fsrs in `services/scheduler.ts` (retention 0.9). Grades: correct → Good, wrong → Again, question with a confident (≥0.5) misconception → Again, any other question → schedule unchanged. `recordInteraction` is a transaction; nodes without `fsrs` are legacy SM-2 and keep their due date until the first graded review. Drill order (`drillPriority`): due reviews, then new concepts, then not-yet-due reviews. Graph responses are projected by `services/graphView.ts` — never return raw SMG docs (they hold 768-float label embeddings).
 
-Five sequential async steps, each dependent on the previous:
-1. `retrieveChunks(uid, courseId, question)` — embed the question, cosine-search Firestore chunks
-2. `explainConcept(question, ragContext, smgHistory)` — Gemini primary model, returns structured JSON
-3. `classifyConcept(question, explanation.solution)` — Gemini fast model, returns `{ conceptNode, errorType, confidence }`
-4. `recordInteraction(uid, conceptNode, ...)` — SM-2 update to `users/{uid}/smg/{conceptNode}`
-5. `saveInteraction(uid, ...)` — event log to `users/{uid}/events/{id}`
+### Ingestion
+`services/chunking.ts` (heading-aware, ~900/1500 chars) → `ingestText` embeds, replaces chunks from the same source, tags `embeddingModel`/`embeddingDim`/`sourceKey`. RAG drops chunks from other embedding models; run `reembed` after a model change.
 
-Steps 4 and 5 are parallelized with `Promise.all`. Gamification (`addXP`, `updateStreak`) is fire-and-forget after the response.
-
-### Student Misconception Graph (SMG)
-
-Each student has a Firestore subcollection `users/{uid}/smg/{conceptNode}`. The `conceptNode` key is snake_case (e.g. `derivatives_chain_rule`). The SM-2 algorithm lives in `server/src/services/misconception.js`. Accuracy, ease factor, review interval, and next review date are all stored here. The drill queue urgency score is `(overdueDays * 2) + ((1 - accuracyRate) * 5)`.
-
-### RAG: Single vs. Multi-Course
-
-`retrieveChunks` in `server/src/services/rag.js` branches on whether `courseId` is provided:
-- **Single course**: uses Firestore native `findNearest` (vector index required)
-- **No courseId**: fetches all courses sequentially, computes cosine similarity in-process — this is an N+1 pattern that degrades with many courses
-
-Chunks are stored at `users/{uid}/courses/{courseId}/chunks/{id}` with a `embedding` vector field (768-dimensional, text-embedding-004).
-
-### Quiz Session Security
-
-Quiz answers are stored server-side at `users/{uid}/quizSessions/{sessionId}` at generation time. The client receives a `sessionId` but never sees the answers. Answer submission routes go through `POST /api/v1/quiz/answer` with `sessionId` + `questionIndex`, and the server grades against the stored session. Sessions expire after 30 minutes.
-
-### Logging
-
-Server uses `pino` (structured JSON). Import `logger` from `./logger.js`. HTTP request logging middleware is in `app.js`. Use `logger.info / warn / error` — never `console.log` in server code.
-
-### Firestore Data Model
-
+### Firestore
 ```
 users/{uid}
-  ├── email, displayName, createdAt
-  ├── courses/{courseId}
-  │   ├── files/{fileId}        — geminiFileUri, filename, fileHash
-  │   └── chunks/{chunkId}      — content, embedding (vector), chunkIndex
-  ├── events/{eventId}          — courseId, eventType, content, response, classifierTag
-  ├── smg/{conceptNode}         — accuracyRate, easeFactor, reviewIntervalDays, nextReviewDate, errorTypeMap
-  └── gamification/stats        — xp, level, streak, lastActivityDate, quizCount, unlockedAchievements
+  ├── courses/{courseId}/files/{fileId}, chunks/{chunkId} (content, embedding vector, embeddingModel, sourceKey)
+  ├── events/{eventId}
+  ├── smg/{conceptNode}      accuracyRate, interactionCount, errorTypeMap, fsrs, nextReviewDate, labelEmbedding, courseId
+  ├── quizSessions/{id}      server-held answers, 30 min expiry
+  └── gamification/stats     xp, streak, lastActivityDate, quizCount, unlockedAchievements
+rateLimits/{key}             only with RATE_LIMIT_STORE=firestore (TTL on expireAt)
 ```
+Vector indexes: `firestore.indexes.json`. Deploy order: `firebase deploy --only firestore:indexes` → server → `reembed`.
 
-`quizSessions/{sessionId}` is a subcollection of `users/{uid}` (not `courses`).
+### Rate limits and caching
+`apiLimiter` per IP before auth; `aiLimiter` per uid after `requireFirebaseAuth` on Gemini-backed routes — keep that order when adding routes. `services/cache.ts` is per process (staleness ≤ TTL across instances).
 
-### Extension Auth vs. Web Auth
-
-The extension uses `chrome.identity.getAuthToken()` → `signInWithCredential()` (Google only). The web app uses Firebase Auth directly (Google SSO + email/password). Both produce Firebase ID tokens used as `Authorization: Bearer <token>` on every API call.
-
-### Gemini Models
-
-`gemini.js` uses two model constants:
-- `PRIMARY_MODEL` — from `env.geminiModel` (explain, quiz generation, streaming)
-- `FAST_MODEL` — hardcoded `gemini-2.0-flash` (classification, fast tasks)
-
-The SMG section builder `buildSmgSection(smg, options)` is a private helper that all three Gemini prompt functions use — do not inline the top-errors logic again.
-
-### Web State Management
-
-- **TanStack Query** — all API data (graph, drill queue, events, gamification). Custom hooks in `web/src/hooks/`.
-- **Zustand** — theme only (`web/src/store/theme.ts`), persisted to localStorage as `sf-theme`.
-- **No other global state** — auth state lives in `web/src/lib/auth.tsx` context.
-
-### CI
-
-Three jobs on `main` and PRs: `lint` (all packages), `test-server` (vitest), `build` (web + extension). All run bun 1.3.11. Tests mock Firebase Admin and Gemini entirely — no real credentials needed.
+### Tests / CI
+Vitest mocks Firebase Admin and Gemini; no credentials needed. When a route gains a middleware export, update the `vi.mock("../middleware/rateLimit")` factories in route tests. Response fields must be added to the zod schemas in `packages/shared/src/contracts/api.ts` or clients silently lose them. CI (bun 1.3.11): lint, test-server (coverage), build, security (`bun audit`).

@@ -1,3 +1,5 @@
+> **Historical planning document (pre-2026-09).** Kept for context; details such as SM-2, text-embedding-004, gemini-2.0-flash and the Gemini File API are superseded. Current design: [ARCHITECTURE.md](ARCHITECTURE.md), [DESIGN.md](DESIGN.md), [../CLAUDE.md](../CLAUDE.md).
+
 **AI Companion (Study Flow)**
 
 *The AI Study Companion That Knows Your Professor*

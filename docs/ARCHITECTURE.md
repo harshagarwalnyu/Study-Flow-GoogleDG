@@ -1,38 +1,38 @@
-# Architecture -- AI Companion (Study Flow)
+# Architecture -- Study Flow
 
-System architecture for the AI study companion. All components are implemented and functional.
+System overview (updated 2026-09-24). Flow-level detail, the FSRS rules and the data model are in [DESIGN.md](DESIGN.md); request/response shapes are in [server/API.md](../server/API.md) and `packages/shared/src/contracts/api.ts`.
 
 ---
 
 ## High-Level Overview
 
 ```
-+-------------------+     +-------------------+
-|  Chrome Extension  |     |     Web App        |
-|  (MV3 Side Panel)  |     |  (React + Vite)    |
-|                    |     |                    |
-|  - Ask/Explain     |     |  - Landing page    |
-|  - Quiz            |     |  - Auth (login/    |
-|  - My Graph        |     |    signup)         |
-|  - Auto-Ingest     |     |  - Dashboard       |
-+---------+----------+     +---------+----------+
-          |                          |
-          |    Firebase ID Token     |
-          +----------+---------------+
-                     |
-              +------v------+
-              | Express API  |
-              | (Node.js)    |
-              | Port 3000    |
-              +------+------+
-                     |
-         +-----------+-----------+
-         |           |           |
-   +-----v----+ +---v----+ +---v-----------+
-   | Gemini   | |Firestore| |Cloud Vision  |
-   | 2.0 Flash| |(NoSQL)  | |(OCR)         |
-   +----------+ +--------+ +--------------+
++---------------------+     +----------------------+
+|  Chrome Extension   |     |       Web App        |
+|  (MV3 side panel)   |     |  (React 19 + Vite)   |
+|  Ask / Quiz / Graph |     |  Landing, auth,      |
+|  auto-ingest,       |     |  dashboard (Cytoscape|
+|  due-review badge   |     |  concept graph)      |
++----------+----------+     +-----------+----------+
+           |   Firebase ID token (Bearer)|
+           +--------------+--------------+
+                          v
+              +-----------------------+
+              |  Express 5 API (TS)   |
+              |  per-IP + per-user    |
+              |  rate limits          |
+              +-----------+-----------+
+                          |
+       +------------------+-------------------+
+       v                  v                   v
+ Gemini API          Firestore            Cloud Vision
+ 3.1 Pro (explain,   SMG, chunks +        (OCR)
+ quiz), 3.8 Flash    vector indexes,
+ (classify),         events, sessions,
+ embedding-2 (768)   gamification
 ```
+
+Model defaults: `packages/shared/src/env/server.ts` (verified 2026-09-24).
 
 ---
 
@@ -42,206 +42,87 @@ System architecture for the AI study companion. All components are implemented a
 
 | Component | File | Role |
 |-----------|------|------|
-| Background worker | `src/background.js` | Opens side panel, handles message passing from content script |
-| Content script | `src/content.js` | Detects Brightspace/Gradescope pages, extracts text for auto-ingestion |
-| Side panel app | `src/sidepanel/` | React app with auth gating, Ask/Quiz/Hub pages |
-| Auth | `src/sidepanel/lib/` | `chrome.identity` -> Google OAuth -> Firebase credential |
-| API client | `src/sidepanel/lib/api.js` | Fetch wrapper injecting Bearer token for all backend calls |
+| Background worker | `src/background.ts`, `src/lib/background-runtime.ts` | Side panel, message bridge, ingestion calls |
+| Drill nudge | `src/lib/drill-nudge.ts` | Toolbar badge with due-review count (hourly `chrome.alarms`, sign-in changes, after quiz answers) |
+| Content script | `src/content.ts` | Brightspace/Gradescope text + PDF extraction, highlighted-selection capture |
+| Side panel | `src/sidepanel/` | Ask (with citations + "For you" callout), Quiz, My Graph |
+| Auth | `src/lib/auth.tsx` | `chrome.identity` → Firebase credential; ID token in `chrome.storage.session` |
 
 ### Web App (`web/`)
 
 | Component | File | Role |
 |-----------|------|------|
-| Auth context | `src/lib/auth.jsx` | `AuthProvider` wrapping app, `onAuthStateChanged` listener |
-| Firebase init | `src/lib/firebase.js` | Client SDK config from `VITE_FIREBASE_*` env vars |
-| API wrapper | `src/lib/api.js` | Auto-attaches Bearer token to every fetch |
-| Protected routes | `src/components/ProtectedRoute.jsx` | Redirects unauthenticated users to /login |
-| Landing page | `src/pages/Home.jsx` | Product overview, feature cards, install CTA |
-| Dashboard | `src/pages/Dashboard.jsx` | SMG visualization, drill queue, session history |
+| Auth context | `src/lib/auth.tsx` | Firebase Auth (Google + email/password) |
+| API wrapper | `src/lib/api.ts` | Wraps `@study-flow/client` with the Bearer token |
+| Dashboard | `src/pages/Dashboard.tsx` | Concept graph (fill = accuracy, border + shape = dominant error type), drill queue, history, ingestion |
 
-### Backend (`server/`)
+### Shared packages
+
+| Package | Role |
+|---------|------|
+| `packages/shared` | zod API contracts and env schema (single source of response shapes) |
+| `packages/client` | Typed API client used by web and extension |
+
+### Backend (`server/src`)
 
 | Subsystem | Files | Role |
 |-----------|-------|------|
-| **Auth middleware** | `middleware/auth.js` | Verifies Firebase ID token on every protected route |
-| **Analyze pipeline** | `routes/analyze.js` | RAG -> Gemini explain -> classifier -> save event -> SM-2 update |
-| **Quiz engine** | `routes/quiz.js` | Generates MCQs weighted by weakness, records answers |
-| **Ingestion** | `routes/ingest.js`, `services/ingestion.js` | File upload + text ingestion -> chunk -> embed -> Firestore |
-| **RAG** | `services/rag.js` | Vector similarity search across course chunks |
-| **SMG engine** | `services/misconception.js` | SM-2 algorithm, concept tracking, drill queue |
-| **Gemini** | `services/gemini.js` | LLM calls for explain, classify, quiz generation |
-| **Embeddings** | `services/embeddings.js` | text-embedding-004 for chunk and query vectors |
-| **OCR** | `services/ocr.js` | Cloud Vision API for image/PDF text extraction |
-| **Firestore helpers** | `services/firestore.js` | saveInteraction, ensureUserDoc |
+| Middleware | `middleware/auth.ts`, `rateLimit.ts`, `firestoreRateLimitStore.ts` | Token verification; `apiLimiter` per IP, `aiLimiter` per uid (optional shared Firestore store) |
+| Gemini access | `ai/geminiProvider.ts`, `services/gemini.ts` | Model aliases, embedding batches, retry; explain / classify / quiz prompts |
+| Question pipeline | `routes/analyze.ts`, `explain.ts`, `stream.ts`, `services/interactions.ts` | RAG → explain → classify → canonicalise → SMG → event |
+| Retrieval | `services/rag.ts`, `services/embeddings.ts` | Query embedding, per-course `findNearest` in parallel, distance cutoff, model filter |
+| Ingestion | `routes/ingest.ts`, `services/ingestion.ts`, `services/chunking.ts` | Heading-aware chunks, embed-then-write, same-source replacement |
+| Concepts | `services/concepts.ts` | Label canonicalisation by label embedding |
+| SMG + scheduling | `services/misconception.ts`, `services/scheduler.ts`, `services/graphView.ts` | FSRS updates in a transaction, drill ordering, projected graph views |
+| Quiz | `routes/quiz.ts` | Generation from weak concepts; server-held answer keys; grading |
+| Gamification | `services/gamification.ts` | `recordActivity` transaction (XP, streak), achievements |
+| Eval / ops | `eval/`, `scripts/reembed.ts` | Retrieval + concept-merge evaluation; vector migration |
 
 ---
 
-## Data Flow: Explain (Ask) Mode
+## Key Flows (summary)
 
-```
-Student types question
-        |
-        v
-Extension sends POST /api/v1/analyze
-  { content: "Why does L'Hopital's rule work?", courseId: "MATH201" }
-        |
-        v
-1. retrieveChunks(uid, courseId, question)
-   - Embed question with text-embedding-004
-   - Firestore findNearest (cosine similarity) on course chunks
-   - Return top-5 matching chunks
-        |
-        v
-2. explainConcept(question, ragContext, smgHistory)
-   - Gemini 2.0 Flash generates structured JSON:
-     { solution, mainConcept, relevantLecture, keyFormulas, personalizedCallout }
-        |
-        v
-3. classifyConcept(question, solution)
-   - Second Gemini call classifies interaction:
-     { conceptNode: "lhopitals_rule", errorType: "knowledge_gap", confidence: 0.85 }
-        |
-        v
-4. saveInteraction(uid, { courseId, content, eventType, response, classifierTag })
-   - Writes to users/{uid}/events/{auto-id}
-        |
-        v
-5. recordInteraction(uid, "lhopitals_rule", { errorType, confidence, courseId })
-   - SM-2 algorithm updates users/{uid}/smg/lhopitals_rule:
-     easeFactor, reviewIntervalDays, nextReviewDate, accuracyRate
-        |
-        v
-Response returned to extension with all fields
-```
+1. **Ask**: embed question → vector search over course chunks → primary model explains using cited chunks and the student's weak concepts → fast model classifies concept + error type → concept merged with an existing node when close → FSRS updates the node if the question revealed a misconception → event saved → XP/streak.
+2. **Quiz**: weakest/due concepts → questions generated from course chunks → answer keys kept server-side (30 min) → answers graded → FSRS Good/Again → badge refresh.
+3. **Ingest**: page text or upload (OCR as needed) → chunks → embeddings → Firestore, replacing the source's earlier chunks → discovered concepts seeded as new SMG nodes.
+4. **Review**: drill queue = due reviews (most forgotten first), then new concepts, then not-yet-due reviews.
 
----
-
-## Data Flow: Quiz Mode
-
-```
-Student clicks "Generate question"
-        |
-        v
-POST /api/v1/quiz { topic?: "integration", courseId?: "MATH201" }
-        |
-        v
-1. If no topic: getWeakestConcepts(uid) picks from SM-2 due concepts
-2. retrieveChunks for context
-3. generateQuiz(topic, chunks, smgData, count)
-   - Gemini generates MCQ with 4 options, correct answer, explanation
-   - Difficulty auto-adjusted by student accuracy
-        |
-        v
-Response: { question, options, answer, explanation, difficulty, conceptNode }
-        |
-        v
-Student selects answer -> POST /api/v1/quiz/answer
-  { conceptNode, selectedAnswer, correctAnswer, courseId }
-        |
-        v
-recordInteraction updates SMG (SM-2):
-  - Correct: ease factor increases, interval grows
-  - Incorrect: interval resets to 1 day, ease factor decreases
-```
-
----
-
-## Data Flow: Ingestion
-
-```
-Option A: File Upload
-  POST /api/v1/ingest/upload (multipart form)
-    |
-    v
-  1. OCR if image/PDF (Cloud Vision API)
-  2. chunkText(text) -> ~500 char overlapping chunks
-  3. embedBatch(chunks) -> 768-dim vectors
-  4. Batch write to Firestore: users/{uid}/courses/{courseId}/chunks/
-  5. Upload to Gemini File API -> store URI in Firestore files subcollection
-
-Option B: Content Script (Auto-Ingest)
-  POST /api/v1/ingest/text
-    { courseId, rawContent, sourcePlatform: "brightspace" }
-    |
-    v
-  Same chunk -> embed -> store pipeline (steps 2-4 above)
-```
-
----
-
-## SM-2 Spaced Repetition Algorithm
-
-The SM-2 algorithm (`services/misconception.js`) schedules concept review:
-
-| Quality | Meaning | Effect on Interval |
-|---------|---------|-------------------|
-| 0-2 | Incorrect answer | Reset to 1 day |
-| 3 | Hard correct / exposure | 1 -> 6 -> interval * easeFactor |
-| 4 | Correct | Same growth |
-| 5 | Easy (no error type) | Same growth, ease factor increases |
-
-**Ease factor** adjusts: `EF' = EF + (0.1 - (5-q) * (0.08 + (5-q) * 0.02))`, minimum 1.3.
-
-**Drill queue urgency** = (overdue days * 2) + ((1 - accuracy) * 5). Higher = review first.
+Details: [DESIGN.md §3–6](DESIGN.md).
 
 ---
 
 ## Authentication
 
 ```
-Extension:
-  chrome.identity.getAuthToken() -> Google OAuth token
-       -> GoogleAuthProvider.credential(null, token)
-       -> signInWithCredential(auth, credential)
-       -> Firebase ID token for API calls
-
-Web App:
-  signInWithPopup(auth, GoogleAuthProvider) -> Firebase ID token
-  OR
-  signInWithEmailAndPassword(auth, email, password) -> Firebase ID token
-
-Backend:
-  Authorization: Bearer <firebase-id-token>
-       -> auth.verifyIdToken(token)
-       -> req.user = { uid, email, name, ... }
+Extension: chrome.identity.getAuthToken() → GoogleAuthProvider.credential(null, token)
+           → signInWithCredential → Firebase ID token
+Web:       signInWithPopup(Google) | signInWithEmailAndPassword → Firebase ID token
+Backend:   Authorization: Bearer <token> → auth.verifyIdToken → req.user
 ```
 
 ---
 
 ## Security Model
 
-- **Firestore access**: All data scoped to `users/{uid}/` -- users can only access their own data
-- **Token verification**: Every API route uses `requireFirebaseAuth` middleware
-- **No stored credentials**: Extension uses browser's existing Brightspace session, never stores passwords
-- **Gemini File URIs**: Stored server-side in Firestore, never exposed to client
-- **Input validation**: Content length limits on Express JSON parser (1MB)
+- **Data isolation**: all data under `users/{uid}/`; every route verifies the Firebase token.
+- **Rate limiting**: per-IP guard on all routes; per-user limit on Gemini-backed routes. Set `TRUST_PROXY` behind a load balancer.
+- **Quiz integrity**: answer keys never leave the server.
+- **Embeddings stay server-side**: graph responses are projected with Firestore `select`.
+- **No stored site credentials**: the extension reads pages in the user's existing session.
+- **Config**: Firebase web config comes from `VITE_FIREBASE_*` env vars, never source (see the `.env.example` files).
 
 ---
 
+## Scaling Notes
+
+- Rate limit: `RATE_LIMIT_STORE=firestore` makes the per-user AI limit exact across instances (enable TTL on `rateLimits.expireAt`).
+- Cache (`services/cache.ts`) is per process; cross-instance staleness is bounded by TTL (≤ 60 s for graph/drill). Use session affinity.
+- `/explain` records the interaction after responding; on runtimes that throttle CPU after a response, move that to a task queue.
+
 ## Environment Variables
 
-### Backend (`server/.env`)
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Gemini API key from AI Studio |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Yes* | Path to Firebase service account JSON |
-| `FIREBASE_PROJECT_ID` | Yes* | Firebase project ID (alternative to credentials file) |
-| `PORT` | No | API port (default: 3000) |
+See `server/.env.example`, `web/.env.example`, `extension/.env.example`, and [DESIGN.md §14](DESIGN.md#14-environment-variables).
 
-*One of GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_PROJECT_ID is required.
+## Deploy Order
 
-### Web App (`web/.env.local`)
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `VITE_FIREBASE_API_KEY` | Yes | Firebase web API key |
-| `VITE_FIREBASE_AUTH_DOMAIN` | Yes | Firebase auth domain |
-| `VITE_FIREBASE_PROJECT_ID` | Yes | Firebase project ID |
-| `VITE_API_URL` | No | Backend URL (default: http://localhost:3000) |
-
-### Extension (`extension/.env`)
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `VITE_FIREBASE_API_KEY` | Yes | Same as web app |
-| `VITE_FIREBASE_AUTH_DOMAIN` | Yes | Same as web app |
-| `VITE_FIREBASE_PROJECT_ID` | Yes | Same as web app |
-| `VITE_API_URL` | No | Backend URL (default: http://localhost:3000) |
+`firebase deploy --only firestore:indexes` → deploy the server → `bun run --cwd server reembed`.

@@ -15,7 +15,7 @@ Study Flow is a Chrome MV3 extension + React web app that builds a persistent mo
 | Feature | Study Flow | ChatGPT | NotebookLM | Anki |
 |---------|-----------|---------|------------|------|
 | Knows your syllabus | Auto (content script) | No | Manual | No |
-| Tracks misconceptions | Yes (SMG + SM-2) | No | No | Manual |
+| Tracks misconceptions | Yes (SMG + FSRS) | No | No | Manual |
 | Professor-style quizzes | Yes (weighted by weakness) | Generic | No | Manual |
 | Lives in browser | Side panel | New tab | New tab | Separate app |
 | Grows smarter over time | Yes | Resets per chat | Static | Manual |
@@ -28,63 +28,45 @@ Study Flow is a Chrome MV3 extension + React web app that builds a persistent mo
 
 ```
 Brightspace / Gradescope page
-    │
-    ▼  (content script auto-fire)
-extension/src/content.js
-    │  POST /api/v1/ingest/text
-    ▼
-┌───────────────────────────────────────────────────┐
-│              Express API  (port 3000)             │
-│                                                   │
-│  POST /api/v1/analyze  ──► RAG ──► Gemini explain │
-│                          ──► Gemini classify      │
-│                          ──► recordInteraction()  │
-│                          ──► saveInteraction()    │
-│                                                   │
-│  POST /api/v1/quiz      ──► getWeakestConcepts()  │
-│                          ──► Gemini generateQuiz  │
-│                          ──► recordInteraction()  │
-│                                                   │
-│  GET  /api/v1/graph     ──► getGraph()            │
-│  GET  /api/v1/graph/drill ► getDrillQueue()       │
-└───────────┬──────────────────────────┬────────────┘
-            │                          │
-            ▼                          ▼
-       Firestore                  Gemini / Cloud Vision
-  users/{uid}/smg/          text-embedding-004 (RAG)
-  users/{uid}/courses/       gemini-2.0-flash (explain, classify, quiz)
-  users/{uid}/events/        cloud-vision (OCR)
+    │  extension/src/content.ts (extract page text / PDFs)
+    ▼  POST /api/v1/ingest/text | /ingest/upload
+┌──────────────────────────────────────────────────────────────┐
+│ Express 5 API (TypeScript, port 3000)                        │
+│  apiLimiter (per IP) → requireFirebaseAuth → aiLimiter (uid) │
+│                                                              │
+│  /analyze, /explain, /stream/explain                         │
+│     RAG (findNearest) → explain (primary) → classify (fast)  │
+│     → resolve concept → FSRS update → event → recordActivity │
+│  /quiz → weakest concepts → generateQuiz → server-held keys  │
+│  /quiz/answer → grade → FSRS update → recordActivity         │
+│  /graph, /graph/drill → projected SMG, drillPriority         │
+└───────────┬──────────────────────────────┬───────────────────┘
+            ▼                              ▼
+       Firestore                   Gemini API / Cloud Vision
+  users/{uid}/smg, courses,     gemini-3.1-pro-preview (explain, quiz)
+  events, quizSessions,         gemini-3.8-flash (classify)
+  gamification; rateLimits      gemini-embedding-2 (768-dim); Vision OCR
 
-Chrome Extension side panel
-    │  Firebase ID Token (chrome.identity → signInWithCredential)
-    └─► same /api/v1/* endpoints above
-
-Web App (React)
-    │  Firebase ID Token (signInWithPopup / signInWithEmailAndPassword)
-    └─► same /api/v1/* endpoints above
+Extension side panel / Web app → Firebase ID token → same /api/v1 routes
 ```
+
+Model defaults are in `packages/shared/src/env/server.ts` (verified 2026-09-24).
 
 ### Packages / layout
 
 ```
-ai-companion-gdg-project/
-├── server/          Express API  (Node.js ESM, bun)
-│   ├── src/
-│   │   ├── routes/      analyze.js  quiz.js  ingest.js  graph.js  course.js  events.js
-│   │   ├── services/    gemini.js  embeddings.js  rag.js  ingestion.js
-│   │   │               misconception.js  ocr.js  firestore.js  cache.js
-│   │   ├── middleware/  auth.js  errorHandler.js  rateLimit.js  validate.js
-│   │   └── db/          firebase.js  (admin SDK init)
-├── extension/       Chrome MV3  (React + Vite, bun)
-│   ├── src/
-│   │   ├── background.js    side panel opener + message bridge
-│   │   ├── content.js       Brightspace/Gradescope detection + auto-ingest
-│   │   └── sidepanel/       React app (Hub | Ask | Quiz | My Graph tabs)
-│   └── public/manifest.json
-└── web/             Web app  (React 19 + Vite, bun)
-    └── src/
-        ├── pages/   Home.jsx  Login.jsx  SignUp.jsx  Dashboard.jsx
-        └── contexts/authContexts/  (AuthProvider, useAuth)
+server/             Express API (TypeScript, bun)
+  src/ai/           geminiProvider.ts (model aliases, batching, retry)
+  src/routes/       analyze explain stream quiz ingest graph course events gamification
+  src/services/     gemini rag embeddings chunking ingestion concepts interactions
+                    misconception scheduler graphView gamification cache ocr firestore
+  src/middleware/   auth rateLimit firestoreRateLimitStore validate errorHandler
+  src/eval/         retrieval + concept-merge evaluation (bun run eval)
+  src/scripts/      reembed.ts (vector migration)
+extension/          Chrome MV3 (React 19 + Vite): background.ts, content.ts, sidepanel/
+web/                React 19 + Vite + TypeScript: pages/ (Home, Login, SignUp, Dashboard), lib/
+packages/shared/    zod API contracts + env schema
+packages/client/    typed API client shared by web and extension
 ```
 
 ---
@@ -92,49 +74,37 @@ ai-companion-gdg-project/
 ## 3. Data Flow: Explain (Ask) Mode
 
 ```
-1.  Student types question in extension side panel
-2.  POST /api/v1/analyze  { content, courseId? }
-3.  retrieveChunks(uid, courseId, question)
-       → embed question with text-embedding-004 (768-dim)
-       → Firestore findNearest on users/{uid}/courses/{courseId}/chunks/
-       → returns top-5 matching text chunks (cosine similarity fallback if needed)
-4.  explainConcept(question, ragContext, smgHistory)
-       → Gemini 2.0 Flash, temp 0.4
-       → structured JSON: { solution, mainConcept, relevantLecture, keyFormulas, personalizedCallout }
-5.  classifyConcept(question, solution)
-       → second Gemini call
-       → returns { conceptNode, errorType, confidence }
-       → conceptNode is snake_case (e.g. "lhopitals_rule")
-       → errorType is one of: conceptual_misunderstanding | procedural_error | knowledge_gap | reasoning_error | none
-6.  saveInteraction(uid, { courseId, content, eventType:"explain", response, classifierTag })
-       → writes to users/{uid}/events/{auto-id}
-7.  recordInteraction(uid, conceptNode, { errorType, confidence, courseId })
-       → SM-2 update on users/{uid}/smg/{conceptNode}
-       → cacheInvalidate("graph:{uid}") + cacheInvalidate("drill:{uid}")
-8.  Response returned to extension
+1. Student asks in the side panel (text, highlighted selection, or screenshot → OCR)
+2. POST /api/v1/analyze { content | imageBase64, courseId? }   (or /explain, /stream/explain)
+3. retrieveChunkRecords(uid, courseId?, question)
+     → embed with gemini-embedding-2, "task: question answering | query: …"
+     → Firestore findNearest per course, in parallel (COSINE, distance ≤ RAG_MAX_COSINE_DISTANCE = 0.6)
+     → chunks from a different embedding model are dropped
+4. explainConcept(question, "[n] (from file)" context, student profile)
+     → primary model, structured JSON { solution, mainConcept, relevantLecture, keyFormulas, personalizedCallout }
+5. recordQuestionInteraction (services/interactions.ts)
+     → classifyConcept(question, solution, knownConcepts) with the fast model
+     → resolveConceptNode: exact id → nearest smg.labelEmbedding (≤ 0.15) → new node
+     → recordInteraction (FSRS, transaction) + saveInteraction (event) → cache invalidation
+6. recordActivity (XP + streak, one transaction)
+7. Response includes classifierTag, eventId and sources (the files cited)
 ```
+
+`/explain` responds before step 5 (it runs afterwards); `/analyze` and `/stream/explain` finish it before closing the response.
 
 ---
 
 ## 4. Data Flow: Quiz Mode
 
 ```
-1.  Student requests quiz (topic optional)
-2.  POST /api/v1/quiz  { topic?, courseId?, count? }
-3.  If no topic → getWeakestConcepts(uid)
-       → SMG concepts with nextReviewDate ≤ now, ordered by date
-       → fallback: lowest accuracyRate concepts
-4.  retrieveChunks for topic context
-5.  generateQuiz(topic, chunks, smgData, count)
-       → Gemini 2.0 Flash, temp 0.7
-       → 4-option MCQ, difficulty based on student accuracy:
-            < 30% accuracy → easy
-            30–60%         → medium
-            > 60%          → hard
-6.  Student submits answer → POST /api/v1/quiz/answer
-       { conceptNode, selectedAnswer, correctAnswer, courseId? }
-7.  recordInteraction(uid, conceptNode, { isCorrect, errorType, confidence, courseId })
-       → SM-2 update: correct → interval grows, incorrect → interval resets to 1 day
+1. POST /api/v1/quiz { topic?, courseId?, count? }
+2. No topic → getWeakestConcepts(uid)
+3. retrieveChunks for the topic; generateQuiz(topic, chunks, smgData, count) with the primary model
+4. Malformed questions are dropped; concepts are canonicalised
+5. Answers are stored at users/{uid}/quizSessions/{sessionId} (30 min); the client gets questions without answers
+6. POST /api/v1/quiz/answer { conceptNode, selectedAnswer, sessionId, questionIndex, courseId? }
+     → graded server-side → recordInteraction (Good / Again) → event → recordActivity
+     → response { isCorrect, correctAnswer, eventId }; extension refreshes its badge
 ```
 
 ---
@@ -142,59 +112,50 @@ ai-companion-gdg-project/
 ## 5. Data Flow: Ingestion
 
 ```
-Auto (content script):
-  Detects brightspace.*.edu  or  *.gradescope.com
-  → POST /api/v1/ingest/text  { courseId, rawContent, sourcePlatform:"brightspace" }
+Auto (content script) → POST /api/v1/ingest/text { courseId, rawContent, sourcePlatform }
+Manual               → POST /api/v1/ingest/upload (multipart file + courseId); OCR for images/PDFs
 
-Manual (extension or web file upload):
-  → POST /api/v1/ingest/upload  (multipart: file + courseId + sourcePlatform)
-  → OCR if image/PDF (Cloud Vision API)
-
-Both paths:
-  → chunkText(text)         ~500-char overlapping chunks
-  → embedBatch(chunks)      768-dim vectors
-  → batch write to Firestore: users/{uid}/courses/{courseId}/chunks/
-  → upload to Gemini File API  → store URI in Firestore files subcollection
+Both:
+  → chunkText (services/chunking.ts): heading-aware, ~900-char target, 1500 max,
+    heading path prefixed to each chunk
+  → embedDocuments ("title: … | text: …"), batches of 100, before any write
+  → delete older chunks from the same source (sourceKey), write new ones tagged
+    embeddingModel / embeddingDim / sourceKey
+  → recordIngestedFile upserts files/{fileId}; discovered concepts are initialised in the SMG
 ```
+
+The Gemini File API is not used (uploads expire after 48 h). After changing the embedding model, run `bun run --cwd server reembed`.
 
 ---
 
-## 6. SM-2 Spaced Repetition Algorithm
+## 6. Spaced Repetition: FSRS
 
-Implementation: `server/src/services/misconception.js`
+Implementation: `server/src/services/scheduler.ts` (ts-fsrs), used by `recordInteraction` in `misconception.ts`.
 
-### Quality mapping (`toQuality`)
+Parameters: request retention 0.9, maximum interval 365 days, no fuzz, no short-term steps (reviews land on day boundaries).
 
-| Signal | Quality | Meaning |
-|--------|---------|---------|
-| `isCorrect === false`, confidence > 0.8 | 0 | Confident wrong |
-| `isCorrect === false`, confidence > 0.5 | 1 | Wrong |
-| `isCorrect === false`, confidence ≤ 0.5 | 2 | Barely wrong |
-| Explain mode (no correct/wrong) | 3 | Exposure only |
-| `isCorrect === true`, `errorType !== "none"`, confidence ≤ 0.7 | 4 | Correct with hesitation |
-| `isCorrect === true`, `errorType !== "none"`, confidence > 0.7 | 3 | Correct (harder) |
-| `isCorrect === true`, `errorType === "none"` | 5 | Perfect (easy) |
+### Evidence → grade (`gradeFor`)
 
-### Interval update (`sm2`)
+| Interaction | Grade |
+|-------------|-------|
+| Quiz answer correct | Good |
+| Quiz answer wrong | Again |
+| Question whose classifier `errorType ≠ none` with confidence ≥ 0.5 | Again |
+| Any other question | none — the schedule is not changed |
 
-```
-easeFactor' = max(1.3, EF + 0.1 - (5-q)*(0.08 + (5-q)*0.02))
+A plain question is exposure, not a recall test: scoring it as a pass would push back the review of a concept the student is confused about. `recordInteraction` runs in a Firestore transaction; accuracy counts change only on graded answers. Nodes without an `fsrs` field (scheduled by the old SM-2 code) keep their `nextReviewDate` until the first graded review.
 
-if q < 3:     interval = 1  (reset on failure)
-else if prev == 0: interval = 1
-else if prev == 1: interval = 6
-else:          interval = round(prev * easeFactor')
-```
+### Drill queue order (`drillPriority`)
 
-Interval is capped at 365 days.
+| Bucket | Urgency |
+|--------|---------|
+| Due review (R ≤ 0.9) | 10 + (1 − R)·10 + (1 − accuracy)·5 |
+| New, asked about | 6 |
+| New, from ingestion only | 5 |
+| Review not yet due | (1 − R)·10 + (1 − accuracy)·4 |
+| Legacy SM-2 node | overdueDays·2 + (1 − accuracy)·5 |
 
-### Drill queue urgency
-
-```
-urgency = (overdueDays * 2) + ((1 - accuracyRate) * 5)
-```
-
-Higher urgency = shown first in quiz and dashboard drill queue.
+R is FSRS retrievability now. Drill items carry `due` and `retrievability`; the extension badge counts `due` items.
 
 ---
 
@@ -221,28 +182,35 @@ All endpoints require `Authorization: Bearer <firebase-id-token>` except `/healt
 | Method | Endpoint | Body / Params | Response |
 |--------|----------|---------------|----------|
 | GET | `/health` | — | `{ ok, service, env?, firestore? }` |
-| POST | `/api/v1/analyze` | `{ content, courseId?, imageBase64? }` | `{ question, solution, mainConcept, relevantLecture, keyFormulas, personalizedCallout, classifierTag, eventId }` |
-| POST | `/api/v1/explain` | `{ question, courseId? }` | Same as analyze, no SMG update |
-| POST | `/api/v1/quiz` | `{ topic?, courseId?, count? }` | `{ question, options[], answer, explanation, difficulty, conceptNode }` |
-| POST | `/api/v1/quiz/answer` | `{ conceptNode, selectedAnswer, correctAnswer, courseId? }` | `{ isCorrect, eventId }` |
-| GET | `/api/v1/quiz/queue` | — | `{ queue: [{ conceptNode, accuracyRate, nextReviewDate, urgency }] }` |
-| POST | `/api/v1/ingest/upload` | multipart: `file`, `courseId`, `sourcePlatform` | `{ ok, filename, courseId }` |
+| POST | `/api/v1/analyze` | `{ content?, imageBase64?, courseId? }` | `{ question, solution, mainConcept, relevantLecture, keyFormulas, personalizedCallout, sources, classifierTag, eventId }` |
+| POST | `/api/v1/explain` | `{ question, courseId? }` | `{ question, solution, mainConcept, relevantLecture, keyFormulas, personalizedCallout, sources }`; SMG updated after the response |
+| POST | `/api/v1/stream/explain` | `{ question, courseId? }` | SSE `data: {text}` … `data: [DONE]` |
+| POST | `/api/v1/quiz` | `{ topic?, courseId?, count? }` | `{ topic, courseId?, sessionId, questions: [{ question, options[], explanation?, difficulty, conceptNode }] }` |
+| POST | `/api/v1/quiz/answer` | `{ conceptNode, selectedAnswer, sessionId, questionIndex, courseId? }` | `{ isCorrect, correctAnswer, eventId }` |
+| GET | `/api/v1/quiz/queue` | — | `{ queue: [DrillItem] }` |
+| POST | `/api/v1/ingest/upload` | multipart: `file`, `courseId`, `sourcePlatform?` | `{ ok, filename, courseId }` |
 | POST | `/api/v1/ingest/text` | `{ courseId, rawContent, sourcePlatform?, filename? }` | `{ ok, courseId, ingestedAt }` |
-| GET | `/api/v1/graph` | — | `{ nodes: [SMGNode] }` |
+| GET | `/api/v1/graph` | — | `{ nodes: [GraphNode] }` |
 | GET | `/api/v1/graph/drill` | — | `{ queue: [DrillItem] }` |
-| GET | `/api/v1/graph/course/:courseId` | — | `{ nodes: [SMGNode] }` |
-| GET | `/api/v1/courses` | — | `{ courses: [{ courseId, platform, lastIngestedAt }] }` |
-| GET | `/api/v1/courses/:courseId` | — | `{ courseId, ingestedDocs, chunkCount }` |
-| GET | `/api/v1/events` | `?limit=50&offset=0` | `{ events, count }` |
+| GET | `/api/v1/graph/course/:courseId` | — | `{ nodes: [GraphNode] }` |
+| GET | `/api/v1/courses` | — | `{ courses: [...] }` |
+| GET | `/api/v1/courses/:courseId` | — | course detail |
+| GET | `/api/v1/events` | `?limit&offset` | `{ events, count }` |
+| GET | `/api/v1/gamification` | — | `{ xp, level, xpIntoLevel, nextLevelXP, streak, achievements }` (read-only) |
 
-### Type: SMGNode
+Gemini-backed routes (analyze, explain, stream, quiz generation, ingest) are rate-limited per user. Exact shapes: `packages/shared/src/contracts/api.ts`.
+
+### Type: GraphNode
 ```json
 {
   "conceptNode": "lhopitals_rule",
   "accuracyRate": 0.6,
-  "errorTypeMap": { "procedural_error": 2, "knowledge_gap": 1 },
+  "interactionCount": 5,
   "nextReviewDate": "<timestamp>",
-  "interactionCount": 5
+  "courseId": "calc1",
+  "errorTypeMap": { "procedural_error": 2, "knowledge_gap": 1 },
+  "dominantErrorType": "procedural_error",
+  "retrievability": 0.83
 }
 ```
 
@@ -252,7 +220,10 @@ All endpoints require `Authorization: Bearer <firebase-id-token>` except `/healt
   "conceptNode": "lhopitals_rule",
   "accuracyRate": 0.6,
   "nextReviewDate": "<timestamp>",
-  "urgency": 7.0
+  "interactionCount": 5,
+  "urgency": 13.7,
+  "due": true,
+  "retrievability": 0.81
 }
 ```
 
@@ -278,11 +249,15 @@ All data is under `users/{uid}/`. Users can only read/write their own subcollect
 | incorrectCount | number | Running total |
 | errorTypeMap | map | `{ errorType: count }` |
 | interactionCount | number | All interactions (including explains) |
-| easeFactor | number | SM-2 EF, min 1.3, default 2.5 |
-| reviewIntervalDays | number | Days until next review |
-| nextReviewDate | timestamp | EF-scheduled review date |
+| fsrs | map | FSRS card: due, stability, difficulty, scheduledDays, learningSteps, reps, lapses, state, lastReview |
+| reviewIntervalDays | number | FSRS scheduled days (legacy SM-2 value on old nodes) |
+| nextReviewDate | timestamp | `fsrs.due`, kept as a top-level field for queries |
+| labelEmbedding | vector | 768-dim label vector for concept matching (never sent to clients) |
+| labelEmbeddingModel | string | Model that produced `labelEmbedding` |
+| isInitializedOnly | boolean | Created by ingestion, not yet studied |
 | lastInteractionAt | timestamp | Server timestamp |
 | lastErrorAt | timestamp \| null | Last wrong answer |
+| easeFactor | number | Legacy SM-2 field on old nodes only |
 
 ### `users/{uid}/events/{eventId}`
 | Field | Type | Notes |
@@ -304,20 +279,25 @@ All data is under `users/{uid}/`. Users can only read/write their own subcollect
 ### `users/{uid}/courses/{courseId}/chunks/{chunkId}`
 | Field | Type | Notes |
 |-------|------|-------|
-| content | string | ~500-char text chunk |
-| embedding | vector | 768-dim float (Firestore Vector type) |
-| metadata | map | `{ filename, source, page, week }` |
+| content | string | Chunk text (~900 chars) with its heading path prefixed |
+| embedding | vector | 768-dim (Firestore vector, flat index in firestore.indexes.json) |
+| embeddingModel | string | e.g. `gemini-embedding-2`; RAG ignores other models |
+| embeddingDim | number | 768 |
+| sourceKey | string | `file:<name>` or `hash:<sha256>`; re-ingesting a source replaces its chunks |
+| filename | string | Source file name, used for citations |
 | chunkIndex | number | Position in original doc |
 | createdAt | timestamp | — |
 
 ### `users/{uid}/courses/{courseId}/files/{fileId}`
 | Field | Type | Notes |
 |-------|------|-------|
-| geminiFileUri | string | Gemini File API URI (server-side only) |
 | filename | string | — |
-| fileHash | string | SHA-256 of filename + courseId (dedup key) |
 | sourcePlatform | string | — |
+| contentHash | string | SHA-256 of the content |
+| chunkCount | number | Chunks written |
 | uploadedAt | timestamp | — |
+
+`fileId` is SHA-256 of `courseId:filename`.
 
 ---
 
@@ -345,13 +325,11 @@ Backend:
 
 ## 11. In-Memory Cache
 
-`server/src/services/cache.js` — LRU Map with TTL.
+`server/src/services/cache.ts` — LRU Map with TTL, per process.
 
-- **Capacity**: 5,000 entries max (evicts oldest on overflow)
-- **TTL**: per-entry (default 60 s for graph/drill responses)
-- **Sweep**: expired entries purged every 100 writes
-- **LRU**: `cacheGet` deletes + re-inserts to refresh insertion order
-- **Invalidation**: `analyze.js` calls `cacheInvalidate("graph:{uid}")` and `cacheInvalidate("drill:{uid}")` **after** `recordInteraction` completes (race-condition-safe)
+- **Capacity**: 5,000 entries; **TTL**: 60 s for graph/drill, 2 min default; sweep every 100 writes
+- **Invalidation**: after SMG writes (`graph:{uid}`, `drill:{uid}`) and ingestion (`courses:{uid}`)
+- **Multiple instances**: invalidation only reaches the instance that handled the write, so others can serve stale data until TTL. Use load-balancer session affinity; anything that must be exact belongs in Firestore.
 
 ---
 
@@ -364,9 +342,11 @@ Backend:
 | Hub | Shows SMG-weighted recommended topics + quick links to Ask / Quiz |
 | Ask | Text input → calls `/analyze` → renders solution cards (step-by-step, key formulas, relevant lecture, personalized callout based on SMG) |
 | Quiz | Topic input (or auto-select from weak areas) → MCQ with 4 options → color-coded feedback → running score |
-| My Graph | Network visualization of SMG concept nodes; planned (currently dashboard is web-only) |
+| My Graph | Per-concept mastery bars with a "mostly <error type>" tag; the web dashboard has the Cytoscape network |
 
-**Content script** (`content.js`):
+**Toolbar badge**: number of concepts due for review, refreshed hourly (`chrome.alarms`), on sign-in changes and after quiz answers.
+
+**Content script** (`content.ts`):
 - Triggers on `*://*.brightspace.com/*` and `*://*.gradescope.com/*`
 - Extracts page text, sends to `/api/v1/ingest/text`
 - Shadow DOM widget planned for "Explain this" / "Quiz me" buttons on selected text
@@ -380,9 +360,9 @@ Backend:
 | API auth | Every route (except `/health`) requires a valid Firebase ID token |
 | Data isolation | All Firestore paths scoped to `users/{uid}/`; Firestore rules enforce `request.auth.uid === userId` |
 | No credential storage | Extension uses `chrome.identity` (existing Google session); never reads Brightspace cookies or passwords |
-| Gemini File URIs | Stored in Firestore server-side; never sent to clients |
+| Embeddings | Label and chunk vectors stay server-side; graph responses are projected |
 | Input limits | Express JSON parser capped at 1MB; route-level schema validation via `validate` middleware |
-| Rate limiting | `apiLimiter` middleware on all `/api/v1/*` routes |
+| Rate limiting | `apiLimiter` per IP on `/api/v1/*` (120/min); `aiLimiter` per uid on Gemini routes (20/min, optional shared Firestore store); `TRUST_PROXY` for real client IPs |
 | Security headers | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, HSTS in production |
 
 ---
@@ -397,6 +377,12 @@ Backend:
 | `FIREBASE_PROJECT_ID` | One of these | Project ID for ADC fallback |
 | `PORT` | No | Defaults to 3000 |
 | `ALLOWED_ORIGINS` | No | Comma-separated CORS origins (empty = permissive in dev) |
+| `GEMINI_MODEL` / `GEMINI_FAST_MODEL` / `GEMINI_EMBEDDING_MODEL` | No | Override model defaults (see section 2) |
+| `RAG_MAX_COSINE_DISTANCE` | No | RAG cutoff, default 0.6 (tune with `bun run --cwd server eval`) |
+| `CONCEPT_MATCH_MAX_DISTANCE` | No | Concept merge cutoff, default 0.15 |
+| `TRUST_PROXY` | No | Proxy hop count (1 behind one load balancer) |
+| `RATE_LIMIT_STORE` | No | `memory` (default) or `firestore` (shared AI limit) |
+| `RATE_LIMIT_IP_PER_MINUTE` / `RATE_LIMIT_AI_PER_MINUTE` | No | Defaults 120 / 20 |
 
 ### `web/.env.local` and `extension/.env`
 | Variable | Required | Description |
@@ -435,10 +421,11 @@ GitHub Actions (`.github/workflows/ci.yml`):
 
 | Job | What it runs |
 |-----|-------------|
-| `ci-lint` | `bun run lint` (ESLint, `--max-warnings 0`) |
-| `ci-test-server` | `bun run --cwd server test` (Vitest) |
-| `ci-build-web-extension` | `bun run build` (web + extension Vite builds) |
-| `ci-dependency-review` | `actions/dependency-review-action` (PR only) |
-| `ci-required` | Gate job — PR is mergeable only if all above pass |
+| `lint` | `bun run lint` (ESLint, `--max-warnings 0`) |
+| `test-server` | `bun run --cwd server test:coverage` (Vitest, 80% thresholds) |
+| `build` | `bun run build` (web + extension Vite builds) |
+| `dependency-review` | `actions/dependency-review-action` (PR only; needs the repo dependency graph enabled) |
+| `security` | `bun audit` |
+| `required` | Gate job — PR is mergeable only if all above pass |
 
 Firebase Hosting deploys preview URLs on each PR and production on merge to `main`.

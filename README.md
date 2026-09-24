@@ -9,7 +9,7 @@ A Chrome extension + web app that gives university math/STEM students **contextu
 Students juggle search tabs, calculators, ChatGPT, and Anki -- none of which know what their professor actually taught. Study Flow solves three problems:
 
 1. **Context loss** -- AI tools don't know your syllabus. Study Flow auto-ingests your Brightspace/Gradescope materials so every answer is grounded in what your professor actually covered.
-2. **Cognitive debt** -- Students re-learn the same concepts because nothing tracks what they misunderstand. The Student Misconception Graph (SMG) classifies every interaction and uses SM-2 spaced repetition to schedule targeted review.
+2. **Cognitive debt** -- Students re-learn the same concepts because nothing tracks what they misunderstand. The Student Misconception Graph (SMG) classifies every interaction and uses FSRS spaced repetition to schedule targeted review.
 3. **Workflow disruption** -- Switching to a separate study tool breaks focus. The Chrome extension side panel keeps help one click away without leaving the page.
 
 ---
@@ -29,8 +29,8 @@ Students juggle search tabs, calculators, ChatGPT, and Anki -- none of which kno
 | Feature | What It Does | How It Works |
 |---------|-------------|--------------|
 | **Ask / Explain** | Type or paste a problem, get a structured explanation | RAG retrieves relevant chunks from your ingested course materials, Gemini generates a step-by-step solution with concept identification and key formulas |
-| **Quiz** | Generate professor-style practice questions | SM-2 algorithm picks your weakest concepts, Gemini creates MCQs grounded in your course material, answers update your misconception graph |
-| **My Graph** | See your concept mastery at a glance | Progress bars colored red/yellow/green by accuracy, sorted by weakness and review urgency |
+| **Quiz** | Generate professor-style practice questions | FSRS scheduling picks the concepts you are forgetting, Gemini creates MCQs grounded in your course material, answers update your misconception graph |
+| **My Graph** | See your concept mastery at a glance | Mastery by concept plus its most common error type; the toolbar badge shows how many reviews are due |
 | **Auto-Ingestion** | Course materials sync automatically | Content script detects Brightspace/Gradescope pages, extracts text, chunks and embeds it into Firestore |
 
 ### Web App (Dashboard)
@@ -48,12 +48,12 @@ Students juggle search tabs, calculators, ChatGPT, and Anki -- none of which kno
 | `POST /api/v1/analyze` | Full pipeline: RAG + Gemini explain + classifier + SMG update |
 | `POST /api/v1/explain` | Lightweight explain (no SMG update) |
 | `POST /api/v1/quiz` | Generate quiz questions weighted by weak concepts |
-| `POST /api/v1/quiz/answer` | Submit answer, update SMG via SM-2 |
+| `POST /api/v1/quiz/answer` | Submit answer, update the SMG schedule (FSRS) |
 | `GET /api/v1/quiz/queue` | Spaced repetition drill queue |
 | `POST /api/v1/ingest/upload` | Upload and ingest a file (PDF, image, text) |
 | `POST /api/v1/ingest/text` | Ingest raw text from content script |
 | `GET /api/v1/graph` | Full misconception graph for the user |
-| `GET /api/v1/graph/drill` | Drill queue ranked by urgency |
+| `GET /api/v1/graph/drill` | Drill queue: due reviews, then new concepts |
 | `GET /api/v1/graph/course/:id` | Graph filtered by course |
 | `GET /api/v1/courses` | List ingested courses |
 | `GET /api/v1/courses/:id` | Course details + ingested files + chunk count |
@@ -72,7 +72,7 @@ Chrome Extension                 Web App
           Bearer Token
                 |
         Express API Server
-        (Node.js, port 3000)
+      (TypeScript, port 3000)
                 |
      +----------+----------+
      |          |          |
@@ -83,10 +83,10 @@ Chrome Extension                 Web App
 ### The AI Pipeline (Analyze Flow)
 
 1. Student types a question in the extension
-2. **RAG retrieval**: question is embedded, top-5 matching course chunks are retrieved from Firestore
-3. **Gemini explain**: chunks + question go to Gemini, which returns a structured JSON response (solution, main concept, key formulas, personalized callout)
-4. **Classifier**: a second Gemini call classifies the interaction into a concept node + error type (conceptual misunderstanding, procedural error, knowledge gap, reasoning error)
-5. **SMG update**: the SM-2 algorithm updates the concept's ease factor, review interval, and next review date
+2. **RAG retrieval**: the question is embedded (`gemini-embedding-2`) and the closest course chunks are found with Firestore vector search, across courses in parallel, with a distance cutoff
+3. **Gemini explain**: chunks (labelled with their source files) + question + the student's weak concepts go to `gemini-3.1-pro-preview`, which returns structured JSON (solution, main concept, key formulas, personalized callout); the response cites its sources
+4. **Classifier**: `gemini-3.8-flash` tags the interaction with a concept + error type (conceptual misunderstanding, procedural error, knowledge gap, reasoning error); the concept is matched to an existing node by label embedding so near-duplicates merge
+5. **SMG update**: FSRS reschedules the concept when the interaction is real evidence of recall (quiz answers, or a question that reveals a misconception)
 6. **Event log**: the full interaction is saved to Firestore for session history
 
 ### The Student Misconception Graph (SMG)
@@ -95,18 +95,17 @@ Each student has a collection of concept nodes at `users/{uid}/smg/{conceptNode}
 
 - **accuracyRate** -- running correct/incorrect ratio
 - **errorTypeMap** -- frequency of each error type (e.g., `{ "procedural_error": 3, "knowledge_gap": 1 }`)
-- **easeFactor** -- SM-2 ease factor (starts at 2.5, min 1.3)
-- **reviewIntervalDays** -- days until next review (grows on correct, resets on incorrect)
-- **nextReviewDate** -- when this concept should be reviewed
+- **fsrs** -- FSRS memory state (stability, difficulty, reps, lapses, due date)
+- **nextReviewDate** -- when this concept should be reviewed (predicted recall falls to 90%)
 - **interactionCount** -- total times this concept has appeared
 
-The drill queue ranks concepts by urgency = (overdue days * 2) + ((1 - accuracy) * 5).
+The drill queue puts due reviews first (most forgotten first), then new concepts, then reviews that are not due yet. See [docs/DESIGN.md](docs/DESIGN.md#6-spaced-repetition-fsrs).
 
 ### Course Ingestion
 
 Materials are ingested two ways:
 
-1. **File upload** (`POST /ingest/upload`): PDF, image, or text file -> OCR if needed -> chunk into ~500-char overlapping segments -> batch embed with Gemini text-embedding-004 -> store chunks with vectors in Firestore -> also upload to Gemini File API for direct file context
+1. **File upload** (`POST /ingest/upload`): PDF, image, or text file -> OCR if needed -> heading-aware chunks (~900 chars, section path kept) -> batch embed with `gemini-embedding-2` -> replace any earlier chunks from the same source -> store with vectors in Firestore
 2. **Content script** (`POST /ingest/text`): extension detects Brightspace/Gradescope pages -> extracts page text -> sends to backend -> same chunk/embed pipeline
 
 Chunks are stored at `users/{uid}/courses/{courseId}/chunks/{auto-id}` with vector embeddings for cosine similarity search.
@@ -136,7 +135,7 @@ users/{uid}
 
 ### Prerequisites
 
-- Node.js 18+
+- Bun 1.3+
 - A Firebase project with Firestore and Auth enabled
 - A Gemini API key ([get one here](https://aistudio.google.com/app/apikey))
 - (Optional) Google Cloud Vision API enabled for OCR
@@ -206,58 +205,20 @@ Then in Chrome: Extensions -> Developer mode -> Load unpacked -> select `extensi
 ## Project Structure
 
 ```
-AI-Companion-GDG-Project/
-├── server/                 # Express API backend
-│   ├── src/
-│   │   ├── index.js        # App entry, Express setup, /health
-│   │   ├── env.js          # Environment variable config
-│   │   ├── db/
-│   │   │   └── firebase.js # Firebase Admin SDK init (db + auth exports)
-│   │   ├── middleware/
-│   │   │   ├── auth.js     # requireFirebaseAuth middleware
-│   │   │   └── errorHandler.js
-│   │   ├── routes/
-│   │   │   ├── index.js    # Router aggregator
-│   │   │   ├── analyze.js  # Full RAG + explain + classify + SMG pipeline
-│   │   │   ├── explain.js  # Lightweight explain (no SMG)
-│   │   │   ├── quiz.js     # Quiz generation + answer submission
-│   │   │   ├── ingest.js   # File upload + text ingestion
-│   │   │   ├── graph.js    # SMG graph + drill queue
-│   │   │   ├── course.js   # Course listing + details
-│   │   │   └── events.js   # Interaction history
-│   │   └── services/
-│   │       ├── gemini.js       # Gemini LLM (explain, classify, quiz)
-│   │       ├── embeddings.js   # text-embedding-004 (embed, embedBatch)
-│   │       ├── rag.js          # Vector search + RAG pipeline
-│   │       ├── ingestion.js    # Chunk, embed, store, Gemini File API
-│   │       ├── misconception.js # SM-2 algorithm + SMG read/write
-│   │       ├── firestore.js    # saveInteraction, ensureUserDoc
-│   │       └── ocr.js          # Google Cloud Vision (image + PDF OCR)
-│   └── package.json
-│
-├── web/                    # Marketing site + dashboard (Vite + React)
-│   ├── src/
-│   │   ├── main.jsx
-│   │   ├── App.jsx
-│   │   ├── lib/            # Firebase client, auth context, API wrapper
-│   │   ├── components/     # Layout, ProtectedRoute
-│   │   └── pages/          # Home, Login, SignUp, Welcome, Download, Dashboard
-│   └── package.json
-│
-├── extension/              # Chrome extension (MV3, Vite + React)
-│   ├── public/manifest.json
-│   ├── src/
-│   │   ├── background.js   # Service worker (panel setup, message passing)
-│   │   ├── content.js      # Brightspace/Gradescope page detection + ingestion
-│   │   └── sidepanel/
-│   │       ├── main.jsx
-│   │       ├── App.jsx     # Auth gating + routing
-│   │       ├── Shell.jsx   # Navigation shell (Hub, Ask, Quiz tabs)
-│   │       ├── lib/        # Firebase client, auth, API wrapper
-│   │       └── pages/      # Hub, Ask, Quiz, SignIn, Loading
-│   └── package.json
-│
-└── docs/                   # Design documents
+├── server/            Express 5 API (TypeScript)
+│   └── src/
+│       ├── ai/            Gemini provider (models, batching, retry)
+│       ├── routes/        analyze, explain, stream, quiz, ingest, graph, course, events, gamification
+│       ├── services/      rag, embeddings, chunking, ingestion, concepts, interactions,
+│       │                  misconception (SMG), scheduler (FSRS), graphView, gamification, cache, ocr
+│       ├── middleware/    auth, rate limits, validation, errors
+│       ├── eval/          retrieval + concept-merge evaluation (`bun run --cwd server eval`)
+│       └── scripts/       reembed (vector migration)
+├── web/               Marketing site + dashboard (React 19, Vite, TypeScript, Cytoscape)
+├── extension/         Chrome MV3 (React 19, Vite): background.ts, content.ts, sidepanel/
+├── packages/shared/   zod API contracts + env schema
+├── packages/client/   typed API client for web + extension
+└── docs/              ARCHITECTURE.md, DESIGN.md (current); older planning docs are marked historical
 ```
 
 ---
@@ -268,9 +229,9 @@ AI-Companion-GDG-Project/
 |-------|-----------|
 | Extension | React 19, Chrome MV3 Side Panel API, Vite |
 | Web App | React 19, React Router 7, Vite |
-| Backend | Node.js, Express 5 |
+| Backend | TypeScript, Express 5 (bun) |
 | Database | Firestore (NoSQL, real-time) |
-| AI | Gemini 2.0 Flash (explain + quiz + classify), text-embedding-004 |
+| AI | Gemini 3.1 Pro (explain, quiz), Gemini 3.8 Flash (classify), gemini-embedding-2 |
 | OCR | Google Cloud Vision API |
 | Auth | Firebase Authentication (Google SSO + email/password) |
 | Vector Search | Firestore native vector search (findNearest) with cosine similarity fallback |
@@ -299,7 +260,7 @@ AI-Companion-GDG-Project/
 | | Study Flow | ChatGPT/Gemini | NotebookLM | Anki |
 |---|---|---|---|---|
 | Knows your syllabus | Yes (auto-ingest) | No | Manual upload | No |
-| Tracks misconceptions | Yes (SMG + SM-2) | No | No | Manual cards |
+| Tracks misconceptions | Yes (SMG + FSRS) | No | No | Manual cards |
 | Professor-style quizzes | Yes (weighted by weakness) | Generic | No | Manual cards |
 | In-browser workflow | Side panel | Separate tab | Separate tab | Separate app |
 | Personalized over time | Yes (grows smarter) | Resets each chat | Static | Manual |
