@@ -126,6 +126,8 @@ export const drillQueueItemSchema = z.object({
   conceptNode: z.string().trim().min(1),
   accuracyRate: z.number().min(0).max(1).optional(),
   urgency: z.number(),
+  /** FSRS-predicted probability of recall now (0–1), when the node has FSRS state. */
+  retrievability: z.number().min(0).max(1).optional(),
 });
 
 export const drillQueueResponseSchema = z.object({

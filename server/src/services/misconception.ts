@@ -3,53 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { logger } from "../logger";
 import { labelEmbeddingFields, resolveConceptNodes } from "./concepts";
 import { embedLabels } from "./embeddings";
-
-/**
- * SM-2 algorithm parameters.
- * - easeFactor starts at 2.5, minimum 1.3
- * - interval starts at 1 day, grows by easeFactor on correct answers
- * - quality: 0-2 = incorrect (reset), 3 = hard correct, 4 = correct, 5 = easy
- */
-export function sm2(prevInterval: number, prevEaseFactor: number, quality: number): { interval: number; easeFactor: number } {
-  let easeFactor = prevEaseFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-  easeFactor = Math.max(1.3, easeFactor);
-
-  let interval: number;
-  if (quality < 3) {
-    // Failed: reset interval
-    interval = 1;
-  } else if (prevInterval === 0) {
-    interval = 1;
-  } else if (prevInterval === 1) {
-    interval = 6;
-  } else {
-    interval = Math.round(prevInterval * easeFactor);
-  }
-
-  return { interval: Math.min(interval, 365), easeFactor };
-}
-
-/**
- * Map classifier confidence + correctness to SM-2 quality score (0-5).
- *
- * @param {boolean|undefined} isCorrect
- * @param {string} errorType
- * @param {number} confidence
- * @returns {number}
- */
-export function toQuality(isCorrect: boolean | undefined, errorType: string, confidence: number): number {
-  if (isCorrect === false) {
-    // Incorrect: quality 0-2 based on how confident the classifier is
-    return confidence > 0.8 ? 0 : confidence > 0.5 ? 1 : 2;
-  }
-  if (isCorrect === true) {
-    // Correct: quality 3-5
-    if (errorType === "none") return 5;
-    return confidence > 0.7 ? 3 : 4;
-  }
-  // Explain mode (no correct/incorrect): treat as quality 3 (exposure)
-  return 3;
-}
+import { applyEvidence, newCard, retrievability, type StoredCard } from "./scheduler";
 
 interface InteractionParams {
   errorType: string;
@@ -64,7 +18,7 @@ interface InteractionParams {
 interface SmgNode {
   interactionCount?: number;
   reviewIntervalDays?: number;
-  easeFactor?: number;
+  fsrs?: StoredCard | Record<string, any>;
   correctCount?: number;
   incorrectCount?: number;
   accuracyRate?: number;
@@ -75,99 +29,89 @@ interface SmgNode {
 }
 
 /**
- * Record a student interaction and update the SMG using SM-2 scheduling.
- * Updates users/{uid}/smg/{conceptNode} in-place.
+ * Record a student interaction and update the SMG node's FSRS schedule and statistics.
+ * Updates users/{uid}/smg/{conceptNode} inside a transaction: a background question and a
+ * quiz answer on the same concept can land together, and a plain read-then-write would let
+ * one silently overwrite the other's counts and schedule.
  *
- * @param {string}  uid
- * @param {string}  conceptNode
- * @param {object}  params
- * @param {string}  params.errorType
- * @param {number}  params.confidence
- * @param {string}  [params.courseId]
- * @param {boolean} [params.isCorrect]
+ * @param {boolean} [params.isCorrect] true/false for graded answers; undefined for questions
  */
 export async function recordInteraction(uid: string, conceptNode: string, { errorType, confidence, courseId, isCorrect, labelEmbedding = null }: InteractionParams): Promise<void> {
-  const smgRef = db.collection("users").doc(uid).collection("smg").doc(conceptNode);
-  const doc = await smgRef.get();
+  const userRef = db.collection("users").doc(uid);
+  const smgRef = userRef.collection("smg").doc(conceptNode);
+  const statsRef = userRef.collection("gamification").doc("stats");
 
-  const quality = toQuality(isCorrect, errorType, confidence);
+  // Embedding is a network call, so never do it inside the transaction (which may retry).
+  const existing = await smgRef.get();
+  const vector = existing.exists ? null : labelEmbedding ?? (await embedLabels([conceptNode]))[0];
 
-  if (doc.exists) {
-    const data = doc.data() as SmgNode;
-    const count = (data.interactionCount || 0) + 1;
+  const outcome = await db.runTransaction(async (txn) => {
+    const doc = await txn.get(smgRef);
+    const now = new Date();
+    const evidence = { isCorrect, errorType, confidence };
 
-    // SM-2 update
-    const prevInterval = data.reviewIntervalDays ?? 1;
-    const prevEase = data.easeFactor || 2.5;
-    const { interval, easeFactor } = sm2(prevInterval, prevEase, quality);
+    if (doc.exists) {
+      const data = doc.data() as SmgNode;
+      const { card } = applyEvidence((data.fsrs as Record<string, any>) ?? null, evidence, now, data.nextReviewDate);
 
-    const nextReviewDate = new Date();
-    nextReviewDate.setDate(nextReviewDate.getDate() + interval);
+      const correctCount = (data.correctCount || 0) + (isCorrect === true ? 1 : 0);
+      const incorrectCount = (data.incorrectCount || 0) + (isCorrect === false ? 1 : 0);
+      const totalAnswered = correctCount + incorrectCount;
+      const accuracyRate = totalAnswered > 0 ? correctCount / totalAnswered : (data.accuracyRate ?? 0);
 
-    // Running accuracy rate
-    const correctCount = (data.correctCount || 0) + (isCorrect === true ? 1 : 0);
-    const incorrectCount = (data.incorrectCount || 0) + (isCorrect === false ? 1 : 0);
-    const totalAnswered = correctCount + incorrectCount;
-    const accuracyRate = totalAnswered > 0 ? correctCount / totalAnswered : 0;
+      const errorTypeMap = { ...(data.errorTypeMap || {}) };
+      if (errorType && errorType !== "none") {
+        errorTypeMap[errorType] = (errorTypeMap[errorType] || 0) + 1;
+      }
 
-    // Error type frequency map
-    const errorTypeMap = data.errorTypeMap || {};
-    if (errorType && errorType !== "none") {
-      errorTypeMap[errorType] = (errorTypeMap[errorType] || 0) + 1;
+      txn.update(smgRef, {
+        accuracyRate,
+        correctCount,
+        incorrectCount,
+        errorTypeMap,
+        interactionCount: (data.interactionCount || 0) + 1,
+        fsrs: card,
+        reviewIntervalDays: card.scheduledDays,
+        nextReviewDate: card.due,
+        lastInteractionAt: FieldValue.serverTimestamp(),
+        lastErrorAt: isCorrect === false ? FieldValue.serverTimestamp() : (data.lastErrorAt || null),
+        courseId: courseId || data.courseId || null,
+        isInitializedOnly: false,
+      });
+      return { created: false, accuracyRate, answered: totalAnswered > 0 };
     }
 
-    const effectiveCourseId = courseId || data.courseId || null;
-    await smgRef.update({
-      accuracyRate,
-      correctCount,
-      incorrectCount,
-      errorTypeMap,
-      interactionCount: count,
-      easeFactor,
-      reviewIntervalDays: interval,
-      nextReviewDate,
-      lastInteractionAt: FieldValue.serverTimestamp(),
-      lastErrorAt: isCorrect === false ? FieldValue.serverTimestamp() : (data.lastErrorAt || null),
-      courseId: effectiveCourseId,
-    });
-    if (accuracyRate >= 0.9) {
-      const statsRef = db.collection("users").doc(uid).collection("gamification").doc("stats");
-      db.runTransaction(async (txn) => {
-        const snap = await txn.get(statsRef);
-        const current = snap.exists ? ((snap.data() as any).maxAccuracy ?? 0) : 0;
-        if (accuracyRate > current) {
-          txn.set(statsRef, { maxAccuracy: accuracyRate }, { merge: true });
-        }
-      }).catch((err: any) => logger.warn({ err: err instanceof Error ? err.message : err, uid, conceptNode }, 'gamification stat sync failed'));
-    }
-  } else {
-    // First interaction with this concept. Every node gets a label vector so later
-    // near-duplicate labels resolve to it (see resolveConceptNode).
-    const vector = labelEmbedding ?? (await embedLabels([conceptNode]))[0];
-    const { interval, easeFactor } = sm2(0, 2.5, quality);
-    const nextReviewDate = new Date();
-    nextReviewDate.setDate(nextReviewDate.getDate() + interval);
-
-    const firstAccuracy = isCorrect !== undefined ? (isCorrect ? 1 : 0) : 0;
-    await smgRef.set({
+    const { card } = applyEvidence(null, evidence, now);
+    const accuracyRate = isCorrect === undefined ? 0 : isCorrect ? 1 : 0;
+    txn.set(smgRef, {
       courseId: courseId || null,
-      accuracyRate: firstAccuracy,
+      accuracyRate,
       correctCount: isCorrect === true ? 1 : 0,
       incorrectCount: isCorrect === false ? 1 : 0,
       errorTypeMap: errorType && errorType !== "none" ? { [errorType]: 1 } : {},
       interactionCount: 1,
-      easeFactor,
-      reviewIntervalDays: interval,
-      nextReviewDate,
+      fsrs: card,
+      reviewIntervalDays: card.scheduledDays,
+      nextReviewDate: card.due,
       lastInteractionAt: FieldValue.serverTimestamp(),
       lastErrorAt: isCorrect === false ? FieldValue.serverTimestamp() : null,
       ...labelEmbeddingFields(vector),
     });
-    const newConceptUpdates: any = { conceptCount: FieldValue.increment(1) };
-    if (firstAccuracy >= 0.9) newConceptUpdates.maxAccuracy = firstAccuracy;
-    db.collection("users").doc(uid).collection("gamification").doc("stats")
-      .set(newConceptUpdates, { merge: true })
-      .catch((err: any) => logger.warn({ err: err instanceof Error ? err.message : err, uid, conceptNode }, 'gamification stat sync failed'));
+    return { created: true, accuracyRate, answered: isCorrect !== undefined };
+  });
+
+  // Gamification stats are best-effort and must not fail the interaction.
+  if (outcome.created) {
+    const updates: Record<string, unknown> = { conceptCount: FieldValue.increment(1) };
+    if (outcome.answered && outcome.accuracyRate >= 0.9) updates.maxAccuracy = outcome.accuracyRate;
+    statsRef.set(updates, { merge: true })
+      .catch((err: any) => logger.warn({ err: err instanceof Error ? err.message : err, uid, conceptNode }, "gamification stat sync failed"));
+  } else if (outcome.answered && outcome.accuracyRate >= 0.9) {
+    db.runTransaction(async (txn) => {
+      const snap = await txn.get(statsRef);
+      const current = snap.exists ? ((snap.data() as any).maxAccuracy ?? 0) : 0;
+      if (outcome.accuracyRate > current) txn.set(statsRef, { maxAccuracy: outcome.accuracyRate }, { merge: true });
+    }).catch((err: any) => logger.warn({ err: err instanceof Error ? err.message : err, uid, conceptNode }, "gamification stat sync failed"));
   }
 }
 
@@ -235,15 +179,21 @@ export async function getDrillQueue(uid: string, limit: number = 20): Promise<an
     const data = doc.data() as SmgNode;
     const reviewDate = (data.nextReviewDate as any)?.toDate?.() || data.nextReviewDate || now;
     const overdueDays = Math.max(0, (now.getTime() - reviewDate.getTime()) / (1000 * 60 * 60 * 24));
-    // Urgency: higher = more urgent. Overdue items + low accuracy = most urgent
-    const urgency = overdueDays * 2 + (1 - (data.accuracyRate || 0)) * 5;
+    const accuracy = data.accuracyRate || 0;
+    // Urgency: higher = more urgent. With FSRS state, rank by predicted forgetting (1 - R);
+    // nodes still on the SM-2 schedule fall back to days overdue.
+    const recall = data.fsrs ? retrievability(data.fsrs as Record<string, any>, now) : null;
+    const urgency = recall !== null
+      ? (1 - recall) * 10 + (1 - accuracy) * 5
+      : overdueDays * 2 + (1 - accuracy) * 5;
 
     return {
       conceptNode: doc.id,
-      accuracyRate: data.accuracyRate || 0,
+      accuracyRate: accuracy,
       nextReviewDate: reviewDate,
       interactionCount: data.interactionCount || 0,
       urgency,
+      ...(recall !== null ? { retrievability: recall } : {}),
     };
   });
 
@@ -276,8 +226,8 @@ export async function initializeConcepts(uid: string, concepts: string[], course
       incorrectCount: 0,
       errorTypeMap: {},
       interactionCount: 0,
-      easeFactor: 2.5,
-      reviewIntervalDays: 1,
+      fsrs: newCard(new Date()),
+      reviewIntervalDays: 0,
       nextReviewDate: new Date(),
       lastInteractionAt: FieldValue.serverTimestamp(),
       lastErrorAt: null,
