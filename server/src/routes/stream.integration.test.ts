@@ -35,7 +35,20 @@ vi.mock("../services/gemini", () => ({
   classifyConcept: mockClassify,
 }));
 vi.mock("../services/rag", () => ({ retrieveChunks: mockRetrieveChunks }));
-vi.mock("../services/misconception", () => ({ recordInteraction: mockRecordInteraction }));
+vi.mock("../services/misconception", () => ({ recordInteraction: mockRecordInteraction, getStudentProfile: vi.fn().mockResolvedValue(null) }));
+vi.mock("../services/concepts", async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    listKnownConcepts: vi.fn().mockResolvedValue([]),
+    resolveConceptNode: vi.fn(async (_uid: string, proposed: string) => ({
+      conceptNode: actual.toSnakeCase(proposed) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    })),
+    resolveConceptNodes: vi.fn(async (_uid: string, proposed: string[]) => proposed.map((p) => ({
+      conceptNode: actual.toSnakeCase(p) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    }))),
+  };
+});
 vi.mock("../services/firestore", () => ({ saveInteraction: mockSaveInteraction }));
 vi.mock("../services/gamification", () => ({ addXP: mockAddXP, updateStreak: mockUpdateStreak }));
 vi.mock("../services/ragPolicy", () => ({ shouldUseCourseRag: mockShouldUseRag }));

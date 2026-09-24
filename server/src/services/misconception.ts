@@ -1,6 +1,8 @@
 import { db } from "../db/firebase";
 import { FieldValue } from "firebase-admin/firestore";
 import { logger } from "../logger";
+import { labelEmbeddingFields, resolveConceptNodes } from "./concepts";
+import { embedLabels } from "./embeddings";
 
 /**
  * SM-2 algorithm parameters.
@@ -53,7 +55,10 @@ interface InteractionParams {
   errorType: string;
   confidence: number;
   courseId?: string;
+  /** true/false for graded answers; undefined for questions, which carry no correctness signal. */
   isCorrect?: boolean;
+  /** Label vector for a node that does not exist yet (from resolveConceptNode). */
+  labelEmbedding?: number[] | null;
 }
 
 interface SmgNode {
@@ -81,7 +86,7 @@ interface SmgNode {
  * @param {string}  [params.courseId]
  * @param {boolean} [params.isCorrect]
  */
-export async function recordInteraction(uid: string, conceptNode: string, { errorType, confidence, courseId, isCorrect }: InteractionParams): Promise<void> {
+export async function recordInteraction(uid: string, conceptNode: string, { errorType, confidence, courseId, isCorrect, labelEmbedding = null }: InteractionParams): Promise<void> {
   const smgRef = db.collection("users").doc(uid).collection("smg").doc(conceptNode);
   const doc = await smgRef.get();
 
@@ -136,7 +141,9 @@ export async function recordInteraction(uid: string, conceptNode: string, { erro
       }).catch((err: any) => logger.warn({ err: err instanceof Error ? err.message : err, uid, conceptNode }, 'gamification stat sync failed'));
     }
   } else {
-    // First interaction with this concept
+    // First interaction with this concept. Every node gets a label vector so later
+    // near-duplicate labels resolve to it (see resolveConceptNode).
+    const vector = labelEmbedding ?? (await embedLabels([conceptNode]))[0];
     const { interval, easeFactor } = sm2(0, 2.5, quality);
     const nextReviewDate = new Date();
     nextReviewDate.setDate(nextReviewDate.getDate() + interval);
@@ -154,6 +161,7 @@ export async function recordInteraction(uid: string, conceptNode: string, { erro
       nextReviewDate,
       lastInteractionAt: FieldValue.serverTimestamp(),
       lastErrorAt: isCorrect === false ? FieldValue.serverTimestamp() : null,
+      ...labelEmbeddingFields(vector),
     });
     const newConceptUpdates: any = { conceptCount: FieldValue.increment(1) };
     if (firstAccuracy >= 0.9) newConceptUpdates.maxAccuracy = firstAccuracy;
@@ -245,41 +253,61 @@ export async function getDrillQueue(uid: string, limit: number = 20): Promise<an
 
 /**
  * Initialize a set of concepts in the SMG with default values if they don't exist.
- * This pre-populates the Knowledge Graph after ingestion.
+ * This pre-populates the Knowledge Graph after ingestion. Discovered labels go through the
+ * same resolution as classifier labels, so ingestion cannot create near-duplicate nodes.
  *
  * @param {string} uid
  * @param {string[]} concepts
  * @param {string} courseId
  */
 export async function initializeConcepts(uid: string, concepts: string[], courseId: string): Promise<void> {
-  const batch = db.batch();
-  let added = 0;
+  if (concepts.length === 0) return;
+  const resolved = await resolveConceptNodes(uid, concepts);
 
-  for (const concept of concepts) {
-    const smgRef = db.collection("users").doc(uid).collection("smg").doc(concept);
-    
-    // We check existence first to avoid overwriting real history
-    const doc = await smgRef.get();
-    if (!doc.exists) {
-      batch.set(smgRef, {
-        courseId,
-        accuracyRate: 1.0, // Start with "perfect" (untested)
-        correctCount: 0,
-        incorrectCount: 0,
-        errorTypeMap: {},
-        interactionCount: 0,
-        easeFactor: 2.5,
-        reviewIntervalDays: 1,
-        nextReviewDate: new Date(),
-        lastInteractionAt: FieldValue.serverTimestamp(),
-        lastErrorAt: null,
-        isInitializedOnly: true, // Marker for tracking
-      });
-      added++;
-    }
+  const batch = db.batch();
+  const seen = new Set<string>();
+  for (const concept of resolved) {
+    if (concept.matchedExisting || seen.has(concept.conceptNode)) continue;
+    seen.add(concept.conceptNode);
+    batch.set(db.collection("users").doc(uid).collection("smg").doc(concept.conceptNode), {
+      courseId,
+      accuracyRate: 1.0, // Start with "perfect" (untested)
+      correctCount: 0,
+      incorrectCount: 0,
+      errorTypeMap: {},
+      interactionCount: 0,
+      easeFactor: 2.5,
+      reviewIntervalDays: 1,
+      nextReviewDate: new Date(),
+      lastInteractionAt: FieldValue.serverTimestamp(),
+      lastErrorAt: null,
+      isInitializedOnly: true, // Marker for tracking
+      ...labelEmbeddingFields(concept.labelEmbedding),
+    });
   }
 
-  if (added > 0) {
+  if (seen.size > 0) {
     await batch.commit();
   }
+}
+
+export interface StudentProfile {
+  weakConcepts: string[];
+  errorTypeMap: Record<string, number>;
+}
+
+/**
+ * Summarize the student's current weak spots for prompt personalization. Runs before the
+ * question is classified, so it describes the student overall rather than one concept.
+ */
+export async function getStudentProfile(uid: string, limit = 5): Promise<StudentProfile | null> {
+  const weakest = await getWeakestConcepts(uid, limit);
+  if (weakest.length === 0) return null;
+  const errorTypeMap: Record<string, number> = {};
+  for (const node of weakest) {
+    for (const [type, count] of Object.entries((node.errorTypeMap || {}) as Record<string, number>)) {
+      errorTypeMap[type] = (errorTypeMap[type] || 0) + count;
+    }
+  }
+  return { weakConcepts: weakest.map((n) => n.conceptNode), errorTypeMap };
 }

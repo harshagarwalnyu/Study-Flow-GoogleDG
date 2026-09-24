@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { explainConcept, classifyConcept } from "../services/gemini";
 import { retrieveChunks } from "../services/rag";
-import { recordInteraction } from "../services/misconception";
+import { recordInteraction, getStudentProfile } from "../services/misconception";
 import { saveInteraction, ensureUserDoc } from "../services/firestore";
 import { extractTextFromBase64 } from "../services/ocr";
 import { requireFirebaseAuth } from "../middleware/auth";
@@ -11,38 +11,9 @@ import { cacheInvalidate } from "../services/cache";
 import { addXP, updateStreak } from "../services/gamification";
 import { logger } from "../logger";
 import { shouldUseCourseRag } from "../services/ragPolicy";
+import { normalizeClassifierTag, resolveConceptNode, listKnownConcepts } from "../services/concepts";
 
 export const analyzeRouter = Router();
-
-const ALLOWED_ERROR_TYPES = new Set([
-  "conceptual_misunderstanding",
-  "procedural_error",
-  "knowledge_gap",
-  "reasoning_error",
-  "none",
-]);
-
-function toSnakeCase(input: any): string {
-  return String(input ?? "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
-function normalizeClassifierTag(classifierTag: any, fallbackConcept: string) {
-  const fallback = toSnakeCase(fallbackConcept) || "general_concept";
-  const conceptNode = toSnakeCase(classifierTag?.conceptNode) || fallback;
-  const errorType = ALLOWED_ERROR_TYPES.has(classifierTag?.errorType)
-    ? classifierTag.errorType
-    : "knowledge_gap";
-  const rawConfidence = Number(classifierTag?.confidence);
-  const confidence = Number.isFinite(rawConfidence)
-    ? Math.min(1, Math.max(0, rawConfidence))
-    : 0.5;
-
-  return { conceptNode, errorType, confidence };
-}
 
 analyzeRouter.post("/", requireFirebaseAuth, validate(analyzeSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -61,17 +32,24 @@ analyzeRouter.post("/", requireFirebaseAuth, validate(analyzeSchema), async (req
 
     await ensureUserDoc(uid, req.user!.email || "", req.user!.name || "");
 
-    // 1. Retrieve RAG context from Firestore vector search (only when it makes sense).
-    const ragContext = shouldUseCourseRag(text) && courseId
-      ? (await retrieveChunks(uid, courseId, text)).join("\n\n---\n\n")
-      : "";
+    // 1. Independent reads: RAG context (only when it makes sense), the student's weak-spot
+    //    profile for personalization, and their existing concept ids for the classifier.
+    const [chunks, profile, knownConcepts] = await Promise.all([
+      shouldUseCourseRag(text) && courseId ? retrieveChunks(uid, courseId, text) : Promise.resolve([]),
+      getStudentProfile(uid),
+      listKnownConcepts(uid),
+    ]);
+    const ragContext = chunks.join("\n\n---\n\n");
 
-    // 2. Call Gemini for explanation with RAG context
-    const explanation = await explainConcept(text, ragContext, null as any);
+    // 2. Call Gemini for explanation with RAG context and student history
+    const explanation = await explainConcept(text, ragContext, profile);
 
-    // 3. Classify the interaction for SMG
-    const rawClassifierTag = await classifyConcept(text, explanation.solution);
-    const classifierTag = normalizeClassifierTag(rawClassifierTag, explanation.mainConcept);
+    // 3. Classify the interaction, then map the label onto an existing SMG node when it
+    //    names the same concept, so one weakness is tracked as one node.
+    const rawClassifierTag = await classifyConcept(text, explanation.solution, knownConcepts);
+    const normalizedTag = normalizeClassifierTag(rawClassifierTag, explanation.mainConcept);
+    const resolved = await resolveConceptNode(uid, normalizedTag.conceptNode);
+    const classifierTag = { ...normalizedTag, conceptNode: resolved.conceptNode };
 
     // 4+5. Save interaction event and update SMG in parallel
     const [eventId] = await Promise.all([
@@ -88,11 +66,12 @@ analyzeRouter.post("/", requireFirebaseAuth, validate(analyzeSchema), async (req
           userAgent: req.headers["user-agent"] || undefined,
         },
       }),
+      // A question is not a graded answer: record exposure and error type, not correctness.
       recordInteraction(uid, classifierTag.conceptNode, {
         errorType: classifierTag.errorType,
         confidence: classifierTag.confidence,
         courseId,
-        isCorrect: classifierTag.errorType === "none",
+        labelEmbedding: resolved.labelEmbedding,
       }),
     ]);
     cacheInvalidate(`graph:${uid}`);

@@ -1,5 +1,6 @@
 /**
- * Re-embed course chunks whose vectors came from a different (or unrecorded) embedding model.
+ * Re-embed course chunks whose vectors came from a different (or unrecorded) embedding model,
+ * and backfill SMG concept-label vectors used to merge near-duplicate concepts.
  *
  *   bun run --cwd server reembed -- --dry-run         # count what would change
  *   bun run --cwd server reembed -- --uid <uid>       # one student
@@ -9,7 +10,7 @@
  * interrupted run resumes where it stopped.
  */
 import { FieldPath, FieldValue, type Firestore, type Query, type QueryDocumentSnapshot } from "firebase-admin/firestore";
-import { embedDocuments, currentEmbeddingModel, EMBEDDING_DIM } from "../services/embeddings";
+import { embedDocuments, embedLabels, currentEmbeddingModel, EMBEDDING_DIM } from "../services/embeddings";
 
 const PAGE_SIZE = 200;
 
@@ -23,11 +24,13 @@ export interface ReembedResult {
   scanned: number;
   stale: number;
   updated: number;
+  conceptsScanned: number;
+  conceptsUpdated: number;
 }
 
 export async function reembedStaleChunks(db: Firestore, { uid, dryRun = false, log = () => {} }: ReembedOptions = {}): Promise<ReembedResult> {
   const model = currentEmbeddingModel();
-  const result: ReembedResult = { scanned: 0, stale: 0, updated: 0 };
+  const result: ReembedResult = { scanned: 0, stale: 0, updated: 0, conceptsScanned: 0, conceptsUpdated: 0 };
 
   const sources: Query[] = uid
     ? (await db.collection("users").doc(uid).collection("courses").select().get()).docs.map((c) => c.ref.collection("chunks"))
@@ -36,6 +39,11 @@ export async function reembedStaleChunks(db: Firestore, { uid, dryRun = false, l
   for (const source of sources) {
     await reembedSource(source, model, dryRun, result, log);
   }
+
+  const conceptSource: Query = uid
+    ? db.collection("users").doc(uid).collection("smg")
+    : db.collectionGroup("smg");
+  await backfillConceptLabels(conceptSource, model, dryRun, result);
 
   return result;
 }
@@ -80,6 +88,29 @@ async function reembedSource(source: Query, model: string, dryRun: boolean, resu
   }
 }
 
+async function backfillConceptLabels(source: Query, model: string, dryRun: boolean, result: ReembedResult) {
+  const db = source.firestore;
+  let cursor: QueryDocumentSnapshot | undefined;
+  for (;;) {
+    let query = source.orderBy(FieldPath.documentId()).limit(PAGE_SIZE);
+    if (cursor) query = query.startAfter(cursor);
+    const page = await query.get();
+    if (page.empty) break;
+    cursor = page.docs[page.docs.length - 1];
+    result.conceptsScanned += page.size;
+
+    const stale = page.docs.filter((d) => d.get("labelEmbeddingModel") !== model);
+    if (stale.length === 0 || dryRun) continue;
+    const vectors = await embedLabels(stale.map((d) => d.id));
+    const batch = db.batch();
+    stale.forEach((doc, i) => {
+      batch.update(doc.ref, { labelEmbedding: FieldValue.vector(vectors[i]), labelEmbeddingModel: model });
+    });
+    await batch.commit();
+    result.conceptsUpdated += stale.length;
+  }
+}
+
 function parseArgs(argv: string[]): ReembedOptions {
   const opts: ReembedOptions = { dryRun: argv.includes("--dry-run") };
   const uidAt = argv.indexOf("--uid");
@@ -95,7 +126,10 @@ if (import.meta.main) {
   const { db } = await import("../db/firebase");
   const opts = parseArgs(process.argv.slice(2));
   const res = await reembedStaleChunks(db, { ...opts, log: (m) => console.log(m) });
-  console.log(`${opts.dryRun ? "[dry run] " : ""}model=${currentEmbeddingModel()} scanned=${res.scanned} stale=${res.stale} updated=${res.updated}`);
+  console.log(
+    `${opts.dryRun ? "[dry run] " : ""}model=${currentEmbeddingModel()} chunks: scanned=${res.scanned} stale=${res.stale} updated=${res.updated}; ` +
+    `concepts: scanned=${res.conceptsScanned} updated=${res.conceptsUpdated}`,
+  );
 }
 
 export { parseArgs as _parseArgsForTests };

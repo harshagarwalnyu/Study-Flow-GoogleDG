@@ -6,8 +6,10 @@ vi.mock("firebase-admin/firestore", () => ({
 }));
 
 const { mockEmbedDocuments } = vi.hoisted(() => ({ mockEmbedDocuments: vi.fn() }));
+const { mockEmbedLabels } = vi.hoisted(() => ({ mockEmbedLabels: vi.fn() }));
 vi.mock("../services/embeddings", () => ({
   embedDocuments: mockEmbedDocuments,
+  embedLabels: mockEmbedLabels,
   currentEmbeddingModel: () => "gemini-embedding-2",
   EMBEDDING_DIM: 768,
 }));
@@ -36,16 +38,19 @@ function fakeDb(rowsBySource: Record<string, Row[]>, courseIds: string[] = []) {
     firestore: db,
   });
   const db: any = {
-    collectionGroup: () => query(rowsBySource.all || []),
+    collectionGroup: (name: string) => query((name === "smg" ? rowsBySource.smg : rowsBySource.all) || []),
     collection: () => ({
       doc: () => ({
-        collection: () => ({
-          select: () => ({
-            get: async () => ({
-              docs: courseIds.map((id) => ({ ref: { collection: () => query(rowsBySource[id] || []) } })),
-            }),
-          }),
-        }),
+        collection: (name: string) =>
+          name === "smg"
+            ? query(rowsBySource.smg || [])
+            : {
+                select: () => ({
+                  get: async () => ({
+                    docs: courseIds.map((id) => ({ ref: { collection: () => query(rowsBySource[id] || []) } })),
+                  }),
+                }),
+              },
       }),
     }),
     batch: () => {
@@ -70,6 +75,8 @@ describe("reembedStaleChunks", () => {
   beforeEach(() => {
     mockEmbedDocuments.mockReset();
     mockEmbedDocuments.mockImplementation(async (texts: string[]) => texts.map((_, i) => [i]));
+    mockEmbedLabels.mockReset();
+    mockEmbedLabels.mockImplementation(async (labels: string[]) => labels.map(() => [9]));
   });
 
   it("re-embeds only chunks from other or unrecorded models, grouped by title", async () => {
@@ -83,7 +90,7 @@ describe("reembedStaleChunks", () => {
 
     const res = await reembedStaleChunks(db);
 
-    expect(res).toEqual({ scanned: 4, stale: 3, updated: 3 });
+    expect(res).toMatchObject({ scanned: 4, stale: 3, updated: 3 });
     expect(updates.map((u) => u.id).sort()).toEqual(["a", "b", "d"]);
     expect(updates[0].patch).toMatchObject({ embeddingModel: "gemini-embedding-2", embeddingDim: 768 });
     expect(mockEmbedDocuments).toHaveBeenCalledWith(["text a", "text b"], "w1.pdf");
@@ -95,13 +102,13 @@ describe("reembedStaleChunks", () => {
     await reembedStaleChunks(db);
     mockEmbedDocuments.mockClear();
 
-    expect(await reembedStaleChunks(db)).toEqual({ scanned: 2, stale: 0, updated: 0 });
+    expect(await reembedStaleChunks(db)).toMatchObject({ scanned: 2, stale: 0, updated: 0 });
     expect(mockEmbedDocuments).not.toHaveBeenCalled();
   });
 
   it("counts without writing in dry-run mode", async () => {
     const { db, updates } = fakeDb({ all: [row("a", {})] });
-    expect(await reembedStaleChunks(db, { dryRun: true })).toEqual({ scanned: 1, stale: 1, updated: 0 });
+    expect(await reembedStaleChunks(db, { dryRun: true })).toMatchObject({ scanned: 1, stale: 1, updated: 0 });
     expect(updates).toHaveLength(0);
     expect(mockEmbedDocuments).not.toHaveBeenCalled();
   });
@@ -109,7 +116,7 @@ describe("reembedStaleChunks", () => {
   it("pages through large collections", async () => {
     const rows = Array.from({ length: 450 }, (_, i) => row(String(i).padStart(4, "0"), {}));
     const { db } = fakeDb({ all: rows });
-    expect(await reembedStaleChunks(db)).toEqual({ scanned: 450, stale: 450, updated: 450 });
+    expect(await reembedStaleChunks(db)).toMatchObject({ scanned: 450, stale: 450, updated: 450 });
   });
 
   it("scopes to one student's courses with --uid", async () => {
@@ -117,6 +124,35 @@ describe("reembedStaleChunks", () => {
     const res = await reembedStaleChunks(db, { uid: "u1" });
     expect(res.updated).toBe(2);
     expect(updates.map((u) => u.id).sort()).toEqual(["x", "y"]);
+  });
+});
+
+describe("concept label backfill", () => {
+  beforeEach(() => {
+    mockEmbedLabels.mockReset();
+    mockEmbedLabels.mockImplementation(async (labels: string[]) => labels.map(() => [9]));
+  });
+
+  it("adds label vectors to SMG nodes that lack a current-model vector", async () => {
+    const smg = [
+      { id: "chain_rule", data: {} },
+      { id: "limits", data: { labelEmbeddingModel: "gemini-embedding-2" } },
+      { id: "series", data: { labelEmbeddingModel: "text-embedding-004" } },
+    ];
+    const { db, updates } = fakeDb({ smg });
+
+    const res = await reembedStaleChunks(db);
+
+    expect(res).toMatchObject({ conceptsScanned: 3, conceptsUpdated: 2 });
+    expect(mockEmbedLabels).toHaveBeenCalledWith(["chain_rule", "series"]);
+    expect(updates.map((u) => u.id)).toEqual(["chain_rule", "series"]);
+    expect(updates[0].patch).toEqual({ labelEmbedding: { vector: [9] }, labelEmbeddingModel: "gemini-embedding-2" });
+  });
+
+  it("only counts in dry-run mode", async () => {
+    const { db, updates } = fakeDb({ smg: [{ id: "a", data: {} }] });
+    expect(await reembedStaleChunks(db, { dryRun: true })).toMatchObject({ conceptsScanned: 1, conceptsUpdated: 0 });
+    expect(updates).toHaveLength(0);
   });
 });
 

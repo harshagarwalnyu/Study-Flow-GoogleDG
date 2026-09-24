@@ -30,6 +30,8 @@ export const env = {
   geminiEmbeddingModel: sharedEnv.GEMINI_EMBEDDING_MODEL,
   // Cosine distance cutoff for RAG (distance = 1 - similarity). Tune with `bun run --cwd server eval`.
   ragMaxCosineDistance: parsePositiveFloat(process.env.RAG_MAX_COSINE_DISTANCE, 0.6),
+  // Concept labels closer than this (cosine distance) are merged into one SMG node.
+  conceptMatchMaxDistance: parsePositiveFloat(process.env.CONCEPT_MATCH_MAX_DISTANCE, 0.15),
   graphifyEnabled: parseBoolean(process.env.GRAPHIFY_ENABLED, true),
   graphifyQuestionTokens: parsePositiveInt(process.env.GRAPHIFY_QUESTION_MAX_TOKENS, 220),
   graphifyContextTokens: parsePositiveInt(process.env.GRAPHIFY_CONTEXT_MAX_TOKENS, 1200),

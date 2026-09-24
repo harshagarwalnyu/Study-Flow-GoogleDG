@@ -91,10 +91,24 @@ vi.mock("../services/firestore", () => ({
   ensureUserDoc: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("../services/concepts", async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    listKnownConcepts: vi.fn().mockResolvedValue([]),
+    resolveConceptNode: vi.fn(async (_uid: string, proposed: string) => ({
+      conceptNode: actual.toSnakeCase(proposed) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    })),
+    resolveConceptNodes: vi.fn(async (_uid: string, proposed: string[]) => proposed.map((p) => ({
+      conceptNode: actual.toSnakeCase(p) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    }))),
+  };
+});
 vi.mock("../services/misconception", async (importOriginal) => {
   const actual = await importOriginal() as any;
   return {
     ...actual,
+    getStudentProfile: vi.fn().mockResolvedValue(null),
     recordInteraction: vi.fn().mockResolvedValue(undefined),
     getWeakestConcepts: vi.fn().mockResolvedValue([
       { conceptNode: "derivatives_chain_rule", accuracyRate: 0.3, interactionCount: 5 },

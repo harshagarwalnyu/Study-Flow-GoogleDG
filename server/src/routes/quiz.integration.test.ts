@@ -49,6 +49,19 @@ const {
 // Mock services
 vi.mock("../services/gemini", () => ({ generateQuiz: mockGenerateQuiz }));
 vi.mock("../services/rag", () => ({ retrieveChunks: mockRetrieveChunks }));
+vi.mock("../services/concepts", async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    listKnownConcepts: vi.fn().mockResolvedValue([]),
+    resolveConceptNode: vi.fn(async (_uid: string, proposed: string) => ({
+      conceptNode: actual.toSnakeCase(proposed) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    })),
+    resolveConceptNodes: vi.fn(async (_uid: string, proposed: string[]) => proposed.map((p) => ({
+      conceptNode: actual.toSnakeCase(p) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    }))),
+  };
+});
 vi.mock("../services/misconception", () => ({
   getWeakestConcepts: mockGetWeakest,
   recordInteraction: mockRecordInteraction,
@@ -110,6 +123,43 @@ describe("Quiz API Integration", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.topic).toBe("general");
+    });
+
+    it("passes the topic, chunks and weak-concept data to the generator", async () => {
+      const weak = { conceptNode: "chain_rule", errorTypeMap: { procedural_error: 2 } };
+      mockGetWeakest.mockResolvedValue([weak]);
+      mockRetrieveChunks.mockResolvedValue(["chunk a"]);
+      mockGenerateQuiz.mockResolvedValue({ questions: [] });
+
+      await request(app).post("/api/v1/quiz").send({ count: 2 });
+
+      expect(mockGenerateQuiz).toHaveBeenCalledWith("chain_rule", ["chunk a"], weak, 2);
+    });
+
+    it("drops malformed questions and tags the rest with canonical concept ids", async () => {
+      mockGenerateQuiz.mockResolvedValue({
+        questions: [
+          { question: "ok", options: ["A", "B"], answer: 1, conceptNode: "Chain Rule" },
+          { question: "bad answer index", options: ["A", "B"], answer: 5 },
+          { question: "no options", answer: 0 },
+        ],
+      });
+
+      const res = await request(app).post("/api/v1/quiz").send({ topic: "calc" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.questions).toHaveLength(1);
+      expect(res.body.questions[0].conceptNode).toBe("chain_rule");
+      expect(res.body.questions[0]).not.toHaveProperty("answer");
+    });
+
+    it("fails instead of returning an ungradeable quiz when the session cannot be saved", async () => {
+      mockGenerateQuiz.mockResolvedValue({ questions: [{ question: "Q1", options: ["A", "B"], answer: 0 }] });
+      mockDb.set.mockImplementationOnce(() => Promise.reject(new Error("firestore down")));
+
+      const res = await request(app).post("/api/v1/quiz").send({ topic: "math" });
+
+      expect(res.status).toBe(500);
     });
   });
 

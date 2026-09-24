@@ -29,7 +29,20 @@ vi.mock("../services/gemini", () => ({
   classifyConcept: mockClassify,
 }));
 vi.mock("../services/rag", () => ({ retrieveChunks: mockRetrieveChunks }));
-vi.mock("../services/misconception", () => ({ recordInteraction: mockRecordInteraction }));
+vi.mock("../services/misconception", () => ({ recordInteraction: mockRecordInteraction, getStudentProfile: vi.fn().mockResolvedValue(null) }));
+vi.mock("../services/concepts", async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    listKnownConcepts: vi.fn().mockResolvedValue([]),
+    resolveConceptNode: vi.fn(async (_uid: string, proposed: string) => ({
+      conceptNode: actual.toSnakeCase(proposed) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    })),
+    resolveConceptNodes: vi.fn(async (_uid: string, proposed: string[]) => proposed.map((p) => ({
+      conceptNode: actual.toSnakeCase(p) || "general_concept", matchedExisting: false, distance: null, labelEmbedding: null,
+    }))),
+  };
+});
 vi.mock("../services/firestore", () => ({
   saveInteraction: mockSaveInteraction,
   ensureUserDoc: mockEnsureUserDoc,
@@ -55,6 +68,8 @@ vi.mock("../middleware/auth", () => ({
 }));
 
 import { app } from "../app";
+import * as misconception from "../services/misconception";
+import * as concepts from "../services/concepts";
 
 describe("Analyze API Integration", () => {
   beforeEach(() => {
@@ -81,6 +96,31 @@ describe("Analyze API Integration", () => {
     expect(res.body.solution).toBe("explanation");
     expect(mockSaveInteraction).toHaveBeenCalled();
     expect(mockRecordInteraction).toHaveBeenCalled();
+  });
+
+  it("personalizes, reuses existing concepts, and does not grade a question as right or wrong", async () => {
+    const profile = { weakConcepts: ["chain_rule"], errorTypeMap: { procedural_error: 3 } };
+    vi.mocked(misconception.getStudentProfile).mockResolvedValueOnce(profile);
+    vi.mocked(concepts.listKnownConcepts).mockResolvedValueOnce(["chain_rule"]);
+    vi.mocked(concepts.resolveConceptNode).mockResolvedValueOnce({
+      conceptNode: "chain_rule", matchedExisting: true, distance: 0.07, labelEmbedding: null,
+    });
+    mockExplain.mockResolvedValue({ solution: "sol", mainConcept: "Chain rule" });
+    mockClassify.mockResolvedValue({ conceptNode: "derivatives_chain_rule", errorType: "procedural_error", confidence: 0.8 });
+    mockRetrieveChunks.mockResolvedValue(["chunk1"]);
+
+    const res = await request(app)
+      .post("/api/v1/analyze")
+      .send({ courseId: "c1", content: "Why is d/dx sin(x^2) not cos(x^2)? I keep getting this wrong." });
+
+    expect(res.status).toBe(200);
+    expect(mockExplain).toHaveBeenCalledWith(expect.any(String), "chunk1", profile);
+    expect(mockClassify).toHaveBeenCalledWith(expect.any(String), "sol", ["chain_rule"]);
+    expect(res.body.classifierTag.conceptNode).toBe("chain_rule");
+    const [uid, node, params] = mockRecordInteraction.mock.calls[0];
+    expect([uid, node]).toEqual(["user123", "chain_rule"]);
+    expect(params).toMatchObject({ errorType: "procedural_error", confidence: 0.8, courseId: "c1" });
+    expect(params.isCorrect).toBeUndefined();
   });
 
   it("POST /api/v1/analyze processes imageBase64", async () => {

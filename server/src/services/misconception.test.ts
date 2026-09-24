@@ -29,6 +29,17 @@ const { mockDb, mockFieldValue } = vi.hoisted(() => {
   };
 });
 
+// ── Embeddings + concept resolution (network/vector-index backed) ─────────
+vi.mock("./embeddings", () => ({
+  embedLabels: vi.fn(async (labels: string[]) => labels.map(() => [0.5, 0.5])),
+  currentEmbeddingModel: () => "gemini-embedding-2",
+}));
+vi.mock("./concepts", () => ({
+  labelEmbeddingFields: (v: number[] | null) => (v ? { labelEmbedding: v, labelEmbeddingModel: "gemini-embedding-2" } : {}),
+  resolveConceptNodes: vi.fn(async (_uid: string, labels: string[]) =>
+    labels.map((l) => ({ conceptNode: l, matchedExisting: false, distance: null, labelEmbedding: [0.1] }))),
+}));
+
 vi.mock("../db/firebase", () => ({ db: mockDb }));
 vi.mock("firebase-admin/firestore", () => ({ FieldValue: mockFieldValue }));
 

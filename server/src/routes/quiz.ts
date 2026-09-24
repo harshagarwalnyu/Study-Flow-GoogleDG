@@ -11,6 +11,7 @@ import { quizGenerateSchema, quizAnswerSchema } from "../schemas";
 import { cacheInvalidate } from "../services/cache";
 import { addXP, updateStreak } from "../services/gamification";
 import { logger } from "../logger";
+import { resolveConceptNodes, toSnakeCase } from "../services/concepts";
 
 const db = getFirestore();
 
@@ -58,19 +59,25 @@ quizRouter.post("/", requireFirebaseAuth, validate(quizGenerateSchema), async (r
 
     // Retrieve course material chunks for context
     const chunks = await retrieveChunks(uid, courseId, targetTopic);
-    const context = `Topic: ${targetTopic}\n\nCourse Materials:\n${chunks.join("\n---\n")}`;
 
-    const result = await generateQuiz(context, count);
+    const result = await generateQuiz(targetTopic, chunks, smgData, count);
 
-    const qs = result.questions ?? [];
+    // Tag each question with a canonical SMG node so answers update the node the student
+    // already has instead of a near-duplicate the quiz generator made up.
+    const rawQs = (result.questions ?? []).filter(
+      (q: any) => Array.isArray(q?.options) && q.options.length >= 2 && Number.isInteger(q.answer) && q.answer >= 0 && q.answer < q.options.length,
+    );
+    const resolved = await resolveConceptNodes(uid, rawQs.map((q: any) => toSnakeCase(q.conceptNode) || toSnakeCase(targetTopic)));
+    const qs = rawQs.map((q: any, i: number) => ({ ...q, conceptNode: resolved[i].conceptNode }));
     const shuffledQs = qs.map(shuffleQuestion);
     const sessionId = randomUUID();
 
+    // Grading reads this session, so a quiz whose session was not saved cannot be graded — fail the request.
     await Promise.all([
       db.collection("users").doc(uid).collection("quizSessions").doc(sessionId).set({
-        questions: shuffledQs.map((q: any) => ({ conceptNode: q.conceptNode || targetTopic, answer: q.answer })),
+        questions: shuffledQs.map((q: any) => ({ conceptNode: q.conceptNode, answer: q.answer })),
         expiresAt: Date.now() + 30 * 60 * 1000,
-      }).catch((err) => logger.warn({ err }, "Failed to persist quiz session — grading will be unavailable")),
+      }),
       saveInteraction(uid, {
         courseId,
         content: targetTopic,
