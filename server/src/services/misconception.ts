@@ -3,7 +3,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { logger } from "../logger";
 import { labelEmbeddingFields, resolveConceptNodes } from "./concepts";
 import { embedLabels } from "./embeddings";
-import { applyEvidence, newCard, retrievability, type StoredCard } from "./scheduler";
+import { applyEvidence, newCard, drillPriority, type StoredCard } from "./scheduler";
 import { GRAPH_FIELDS, toGraphNode, type GraphNodeView } from "./graphView";
 
 interface InteractionParams {
@@ -177,23 +177,15 @@ export async function getDrillQueue(uid: string, limit: number = 20): Promise<an
 
   const items = snap.docs.map((doc) => {
     const data = doc.data() as SmgNode;
-    const reviewDate = (data.nextReviewDate as any)?.toDate?.() || data.nextReviewDate || now;
-    const overdueDays = Math.max(0, (now.getTime() - reviewDate.getTime()) / (1000 * 60 * 60 * 24));
-    const accuracy = data.accuracyRate || 0;
-    // Urgency: higher = more urgent. With FSRS state, rank by predicted forgetting (1 - R);
-    // nodes still on the SM-2 schedule fall back to days overdue.
-    const recall = data.fsrs ? retrievability(data.fsrs as Record<string, any>, now) : null;
-    const urgency = recall !== null
-      ? (1 - recall) * 10 + (1 - accuracy) * 5
-      : overdueDays * 2 + (1 - accuracy) * 5;
-
+    const { urgency, due, retrievability: recall } = drillPriority(data as any, now);
     return {
       conceptNode: doc.id,
-      accuracyRate: accuracy,
-      nextReviewDate: reviewDate,
+      accuracyRate: data.accuracyRate || 0,
+      nextReviewDate: (data.nextReviewDate as any)?.toDate?.() || data.nextReviewDate || now,
       interactionCount: data.interactionCount || 0,
       urgency,
-      ...(recall !== null ? { retrievability: recall } : {}),
+      due,
+      ...(recall !== undefined ? { retrievability: recall } : {}),
     };
   });
 

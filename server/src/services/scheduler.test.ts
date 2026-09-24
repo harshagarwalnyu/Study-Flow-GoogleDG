@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Rating, State } from "ts-fsrs";
-import { gradeFor, applyEvidence, newCard, retrievability, fromStored, toStored, QUESTION_EVIDENCE_MIN_CONFIDENCE } from "./scheduler";
+import { gradeFor, applyEvidence, newCard, retrievability, fromStored, toStored, drillPriority, QUESTION_EVIDENCE_MIN_CONFIDENCE, TARGET_RETENTION } from "./scheduler";
 
 const DAY = 86_400_000;
 const t0 = new Date("2026-09-01T12:00:00Z");
@@ -96,5 +96,48 @@ describe("storage round trip and retrievability", () => {
     expect(late).toBeGreaterThan(0);
     expect(retrievability(newCard(t0), t0)).toBe(0);
     expect(retrievability(null, t0)).toBe(0);
+  });
+});
+
+describe("drillPriority", () => {
+  const reviewedOn = (day: Date, correct = true) => applyEvidence(null, { isCorrect: correct }, day).card;
+
+  it("ranks a forgotten studied concept above new concepts from ingestion", () => {
+    const now = new Date(t0.getTime() + 30 * DAY);
+    const forgotten = drillPriority({ fsrs: reviewedOn(t0), accuracyRate: 1, interactionCount: 1 }, now);
+    const ingested = drillPriority({ fsrs: newCard(t0), isInitializedOnly: true }, now);
+    const asked = drillPriority({ fsrs: newCard(t0), interactionCount: 2 }, now);
+
+    expect(forgotten.due).toBe(true);
+    expect(forgotten.retrievability).toBeLessThan(TARGET_RETENTION);
+    expect(forgotten.urgency).toBeGreaterThan(asked.urgency);
+    expect(asked.urgency).toBeGreaterThan(ingested.urgency);
+    expect(ingested).toEqual({ urgency: 5, due: false });
+    expect(asked).toEqual({ urgency: 6, due: false });
+  });
+
+  it("puts reviews that are not yet due after new material, weaker concepts first", () => {
+    const now = new Date(t0.getTime() + 1000);
+    const fresh = drillPriority({ fsrs: reviewedOn(t0), accuracyRate: 1 }, now);
+    const shaky = drillPriority({ fsrs: reviewedOn(t0), accuracyRate: 0.2 }, now);
+    expect(fresh.due).toBe(false);
+    expect(fresh.urgency).toBeLessThan(5);
+    expect(shaky.urgency).toBeGreaterThan(fresh.urgency);
+    expect(shaky.urgency).toBeLessThan(5);
+  });
+
+  it("orders due reviews by how much has been forgotten", () => {
+    const card = reviewedOn(t0);
+    const a = drillPriority({ fsrs: card, accuracyRate: 0.5 }, new Date(t0.getTime() + 10 * DAY));
+    const b = drillPriority({ fsrs: card, accuracyRate: 0.5 }, new Date(t0.getTime() + 60 * DAY));
+    expect(a.due && b.due).toBe(true);
+    expect(b.urgency).toBeGreaterThan(a.urgency);
+  });
+
+  it("keeps the legacy overdue formula for nodes still on SM-2", () => {
+    const now = new Date(t0.getTime() + 3 * DAY);
+    expect(drillPriority({ nextReviewDate: { toDate: () => t0 }, accuracyRate: 0.5 }, now)).toEqual({ urgency: 3 * 2 + 2.5, due: true });
+    expect(drillPriority({ nextReviewDate: new Date(now.getTime() + DAY) }, now)).toEqual({ urgency: 5, due: false });
+    expect(drillPriority({}, now)).toEqual({ urgency: 5, due: true });
   });
 });

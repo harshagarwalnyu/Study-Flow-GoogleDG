@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { getWeakestConcepts, getGraph, getDrillQueue } from "./misconception";
+import { applyEvidence, newCard } from "./scheduler";
 
 const { mockDb, mockFieldValue } = vi.hoisted(() => {
   const mock = {
@@ -88,6 +89,24 @@ describe("misconception service", () => {
       const result = await getDrillQueue("uid1");
       expect(result.length).toBe(2);
       expect(result[0].conceptNode).toBe("node1");
+    });
+
+    it("puts forgotten studied concepts ahead of never-studied ones and flags what is due", async () => {
+      const longAgo = new Date(Date.now() - 60 * 86_400_000);
+      const studied = applyEvidence(null, { isCorrect: true }, longAgo).card;
+      mockDb.get.mockResolvedValue({
+        docs: [
+          { id: "from_ingestion", data: () => ({ fsrs: newCard(new Date()), nextReviewDate: new Date(), isInitializedOnly: true }) },
+          { id: "forgotten", data: () => ({ fsrs: studied, nextReviewDate: studied.due, accuracyRate: 1, interactionCount: 1 }) },
+        ],
+      });
+
+      const result = await getDrillQueue("uid1");
+      expect(result.map((r: any) => r.conceptNode)).toEqual(["forgotten", "from_ingestion"]);
+      expect(result[0]).toMatchObject({ due: true });
+      expect(result[0].retrievability).toBeLessThan(0.9);
+      expect(result[1]).toMatchObject({ due: false });
+      expect(result[1]).not.toHaveProperty("retrievability");
     });
   });
 });

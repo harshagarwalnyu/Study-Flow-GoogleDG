@@ -10,8 +10,11 @@
  */
 import { fsrs, createEmptyCard, Rating, State, type Card, type Grade } from "ts-fsrs";
 
+/** Recall probability FSRS schedules each review at; below it, a reviewed concept is due. */
+export const TARGET_RETENTION = 0.9;
+
 export const scheduler = fsrs({
-  request_retention: 0.9,
+  request_retention: TARGET_RETENTION,
   maximum_interval: 365,
   enable_fuzz: false,
   enable_short_term: false,
@@ -125,4 +128,44 @@ export function retrievability(stored: Record<string, any> | null | undefined, n
   const card = fromStored(stored, now);
   if (card.state === State.New) return 0;
   return scheduler.get_retrievability(card, now, false);
+}
+
+export interface DrillPriority {
+  urgency: number;
+  /** A review is due now (new, never-graded concepts are not "due": they are new material). */
+  due: boolean;
+  retrievability?: number;
+}
+
+/**
+ * Rank an SMG node for the drill queue, in the order spaced-repetition tools use:
+ * due reviews first (most forgotten first), then new material, then reviews not yet due.
+ *   due review     10 + (1-R)*10 + (1-acc)*5   ≥ 11
+ *   new, asked      6     new, ingestion-only   5
+ *   not yet due    (1-R)*10 + (1-acc)*4        < 5
+ * A never-reviewed card has no meaningful recall estimate, so treating it as R=0 would let every
+ * concept discovered by ingestion outrank concepts the student studied and is now forgetting.
+ * Nodes still on the SM-2 schedule (no fsrs field) keep the legacy overdue formula.
+ */
+export function drillPriority(
+  node: { fsrs?: Record<string, any> | null; nextReviewDate?: unknown; accuracyRate?: number; interactionCount?: number; isInitializedOnly?: boolean },
+  now: Date,
+): DrillPriority {
+  const accuracy = node.accuracyRate || 0;
+  if (!node.fsrs) {
+    const reviewDate = toDate(node.nextReviewDate) ?? now;
+    const overdueDays = Math.max(0, (now.getTime() - reviewDate.getTime()) / 86_400_000);
+    return { urgency: overdueDays * 2 + (1 - accuracy) * 5, due: reviewDate.getTime() <= now.getTime() };
+  }
+  const card = fromStored(node.fsrs, now);
+  if (card.state === State.New) {
+    const asked = !node.isInitializedOnly && (node.interactionCount || 0) > 0;
+    return { urgency: asked ? 6 : 5, due: false };
+  }
+  const recall = scheduler.get_retrievability(card, now, false);
+  const due = recall <= TARGET_RETENTION || card.due.getTime() <= now.getTime();
+  const urgency = due
+    ? 10 + (1 - recall) * 10 + (1 - accuracy) * 5
+    : (1 - recall) * 10 + (1 - accuracy) * 4;
+  return { urgency, due, retrievability: recall };
 }
