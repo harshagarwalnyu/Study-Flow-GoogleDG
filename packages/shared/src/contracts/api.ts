@@ -24,7 +24,7 @@ export const analyzeRequestSchema = z.object({
   courseId: z.string().trim().max(100).optional(),
   imageBase64: z.string().max(5_000_000).optional(),
 }).refine((value) => value.content || value.imageBase64, {
-  message: "content or imageBase64 is required",
+  error: "content or imageBase64 is required",
 });
 
 export const explainRequestSchema = z.object({
