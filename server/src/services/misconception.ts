@@ -4,6 +4,7 @@ import { logger } from "../logger";
 import { labelEmbeddingFields, resolveConceptNodes } from "./concepts";
 import { embedLabels } from "./embeddings";
 import { applyEvidence, newCard, retrievability, type StoredCard } from "./scheduler";
+import { GRAPH_FIELDS, toGraphNode, type GraphNodeView } from "./graphView";
 
 interface InteractionParams {
   errorType: string;
@@ -147,15 +148,14 @@ export async function getWeakestConcepts(uid: string, limit: number = 10): Promi
 }
 
 /**
- * Get the full SMG graph for a user (all concept nodes).
- *
- * @param {string} uid
- * @returns {Promise<Array<any>>}
+ * Get the full SMG graph for a user (all concept nodes), projected to the fields the client uses.
  */
-export async function getGraph(uid: string): Promise<any[]> {
-  const snap = await db.collection("users").doc(uid).collection("smg").get();
-  return snap.docs.map((doc) => ({ conceptNode: doc.id, ...doc.data() }));
+export async function getGraph(uid: string): Promise<GraphNodeView[]> {
+  const snap = await db.collection("users").doc(uid).collection("smg").select(...GRAPH_FIELDS).get();
+  const now = new Date();
+  return snap.docs.map((doc) => toGraphNode(doc.id, doc.data(), now));
 }
+
 
 /**
  * Get the spaced repetition drill queue — concepts due for review,

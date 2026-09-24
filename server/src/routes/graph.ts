@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
 import { getGraph, getDrillQueue } from "../services/misconception";
+import { GRAPH_FIELDS, toGraphNode } from "../services/graphView";
 import { requireFirebaseAuth } from "../middleware/auth";
 import { db } from "../db/firebase";
 import { cacheGet, cacheSet } from "../services/cache";
@@ -66,9 +67,11 @@ graphRouter.get("/course/:courseId", requireFirebaseAuth, async (req: Request, r
     const snap = await db.collection("users").doc(uid)
       .collection("smg")
       .where("courseId", "==", courseId)
+      .select(...GRAPH_FIELDS)
       .get();
 
-    const nodes = snap.docs.map((doc) => ({ conceptNode: doc.id, ...doc.data() }));
+    const now = new Date();
+    const nodes = snap.docs.map((doc) => toGraphNode(doc.id, doc.data(), now));
     res.json({ nodes });
   } catch (err) {
     next(err);

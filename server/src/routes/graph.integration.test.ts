@@ -8,11 +8,13 @@ const { mockDb } = vi.hoisted(() => {
     doc: vi.fn(),
     get: vi.fn(),
     where: vi.fn(),
+    select: vi.fn(),
     limit: vi.fn(),
   };
   mock.collection.mockReturnValue(mock);
   mock.doc.mockReturnValue(mock);
   mock.where.mockReturnValue(mock);
+  mock.select.mockReturnValue(mock);
   mock.limit.mockReturnValue(mock);
   return { mockDb: mock };
 });
@@ -114,7 +116,7 @@ describe("Graph API Integration", () => {
 
   it("GET /api/v1/graph/course/:courseId returns filtered nodes", async () => {
     mockDb.get.mockResolvedValueOnce({
-      docs: [{ id: "n1", data: () => ({ name: "N1" }) }]
+      docs: [{ id: "n1", data: () => ({ accuracyRate: 0.4, errorTypeMap: { reasoning_error: 2 }, labelEmbedding: [0.1] }) }]
     });
 
     const res = await request(app)
@@ -123,6 +125,8 @@ describe("Graph API Integration", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.nodes).toHaveLength(1);
+    expect(res.body.nodes[0]).toMatchObject({ conceptNode: "n1", dominantErrorType: "reasoning_error" });
+    expect(res.body.nodes[0]).not.toHaveProperty("labelEmbedding");
   });
 
   it("GET /api/v1/graph/course/:courseId returns 400 for invalid courseId", async () => {

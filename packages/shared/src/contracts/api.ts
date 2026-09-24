@@ -116,6 +116,9 @@ export const graphNodeSchema = z.object({
   interactionCount: z.number().int().min(0).optional(),
   nextReviewDate: timestampValueSchema.optional(),
   courseId: z.string().trim().max(100).optional(),
+  errorTypeMap: z.record(z.string(), z.number()).optional(),
+  dominantErrorType: z.enum(classifierErrorTypes).nullable().optional(),
+  retrievability: z.number().min(0).max(1).optional(),
 });
 
 export const graphResponseSchema = z.object({

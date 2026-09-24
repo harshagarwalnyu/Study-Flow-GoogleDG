@@ -2,6 +2,12 @@ import { useState, useEffect } from "react";
 import { apiFetch } from "../lib/api";
 import styles from "./Pages.module.css";
 
+const ERROR_TYPE_LABEL = {
+  knowledge_gap: "knowledge gaps",
+  procedural_error: "procedural slips",
+  reasoning_error: "reasoning errors",
+};
+
 export function Graph() {
   const [nodes, setNodes] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -49,6 +55,11 @@ export function Graph() {
                 <div className={styles.rowBetween}>
                   <span className={styles.text}>
                     {node.conceptNode.replace(/_/g, " ")}
+                    {ERROR_TYPE_LABEL[node.dominantErrorType] && (
+                      <span className={styles.errorTag}>
+                        mostly {ERROR_TYPE_LABEL[node.dominantErrorType]}
+                      </span>
+                    )}
                   </span>
                   <span className={styles.muted}>{accuracy}%</span>
                 </div>

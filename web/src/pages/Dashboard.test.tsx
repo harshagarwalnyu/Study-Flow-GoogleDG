@@ -16,6 +16,7 @@ const initialData: DashboardInitialData = {
       conceptNode: "chain_rule",
       accuracyRate: 0.42,
       interactionCount: 6,
+      dominantErrorType: "procedural_error",
     },
     {
       conceptNode: "product_rule",
@@ -65,5 +66,21 @@ describe("Dashboard authenticated flow", () => {
     expect(markup).toContain("Drill Queue");
     expect(markup).toContain("Recent Activity");
     expect(markup).toContain("Built for students");
+  });
+
+  it("explains the graph encoding with a legend for mastery and error type", () => {
+    const markup = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/dashboard"]}>
+        <AuthContext.Provider value={mockUser}>
+          <Dashboard initialData={initialData} />
+        </AuthContext.Provider>
+      </MemoryRouter>,
+    );
+
+    expect(markup).toContain('aria-label="Graph legend"');
+    expect(markup).toContain("Mastered (70%+)");
+    expect(markup).toContain("Mostly procedural slips");
+    expect(markup).toContain("Mostly knowledge gaps");
+    expect(markup).toContain("Mostly reasoning errors");
   });
 });

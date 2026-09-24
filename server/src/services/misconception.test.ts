@@ -6,6 +6,7 @@ const { mockDb, mockFieldValue } = vi.hoisted(() => {
     collection: vi.fn(),
     doc: vi.fn(),
     where: vi.fn(),
+    select: vi.fn(),
     get: vi.fn(),
     set: vi.fn().mockReturnValue({ catch: vi.fn() }),
     update: vi.fn().mockResolvedValue(true),
@@ -17,6 +18,7 @@ const { mockDb, mockFieldValue } = vi.hoisted(() => {
   mock.collection.mockReturnValue(mock);
   mock.doc.mockReturnValue(mock);
   mock.where.mockReturnValue(mock);
+  mock.select.mockReturnValue(mock);
   mock.orderBy.mockReturnValue(mock);
   mock.limit.mockReturnValue(mock);
 
@@ -65,10 +67,11 @@ describe("misconception service", () => {
   });
 
   describe("getGraph", () => {
-    it("returns docs", async () => {
-      mockDb.get.mockResolvedValue({ docs: [{ id: "n1", data: () => ({}) }] });
+    it("returns projected nodes and never reads label embeddings", async () => {
+      mockDb.get.mockResolvedValue({ docs: [{ id: "n1", data: () => ({ accuracyRate: 0.5 }) }] });
       const res = await getGraph("u1");
-      expect(res[0].conceptNode).toBe("n1");
+      expect(res[0]).toMatchObject({ conceptNode: "n1", accuracyRate: 0.5, dominantErrorType: null });
+      expect(mockDb.select.mock.calls[0]).not.toContain("labelEmbedding");
     });
   });
 

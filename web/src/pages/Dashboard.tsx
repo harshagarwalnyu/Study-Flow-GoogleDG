@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { ApiFetchOptions } from "@study-flow/client";
+import type { Css } from "cytoscape";
 import type {
   DrillQueueResponse,
   EventRecord,
@@ -21,6 +22,13 @@ import { getConnectExtensionId, sendAuthToExtension } from "../lib/extensionBrid
 import styles from "./Dashboard.module.css";
 
 const EMPTY_GRAPH: GraphResponse = { nodes: [] };
+
+/** Node border/shape per dominant error type (classifier categories). */
+const ERROR_TYPE_STYLE: Record<string, { color: string; shape: Css.NodeShape; glyph: string; label: string }> = {
+  knowledge_gap: { color: "#82aaff", shape: "round-rectangle", glyph: "■", label: "Mostly knowledge gaps" },
+  procedural_error: { color: "#c792ea", shape: "diamond", glyph: "◆", label: "Mostly procedural slips" },
+  reasoning_error: { color: "#f2f5f9", shape: "triangle", glyph: "▲", label: "Mostly reasoning errors" },
+};
 const EMPTY_DRILL: DrillQueueResponse = { queue: [] };
 const EMPTY_EVENTS: EventsResponse = { events: [], count: 0 };
 const EMPTY_GAMIFICATION = { xp: 0, level: 1, xpIntoLevel: 0, nextLevelXP: 100, streak: 0, achievements: [] };
@@ -186,6 +194,7 @@ export default function Dashboard({
           label: node.conceptNode.replace(/_/g, " "),
           accuracy: node.accuracyRate || 0,
           size: Math.max(20, Math.min(60, (node.interactionCount || 1) * 5)),
+          errorType: node.dominantErrorType ?? "none",
         },
       }));
 
@@ -209,6 +218,14 @@ export default function Dashboard({
               },
               width: "data(size)",
               height: "data(size)",
+              // Fill = mastery; border colour + shape = the error type seen most on this concept.
+              // Two channels, so the encoding survives colour-blindness.
+              shape: (element: { data(key: string): string }) =>
+                ERROR_TYPE_STYLE[element.data("errorType")]?.shape ?? "ellipse",
+              "border-width": (element: { data(key: string): string }) =>
+                ERROR_TYPE_STYLE[element.data("errorType")] ? 3 : 0,
+              "border-color": (element: { data(key: string): string }) =>
+                ERROR_TYPE_STYLE[element.data("errorType")]?.color ?? "#000000",
               "font-size": "10px",
               color: "#f2f5f9",
               "text-valign": "bottom",
@@ -448,7 +465,20 @@ export default function Dashboard({
         <div className={styles.panel}>
           <h2 className={styles.panelTitle}>Concept Network</h2>
           {nodes.length > 0 ? (
-            <div ref={graphRef} className={styles.graphContainer} />
+            <>
+              <div ref={graphRef} className={styles.graphContainer} />
+              <ul className={styles.graphLegend} aria-label="Graph legend">
+                <li><span className={styles.legendSwatch} style={{ background: "#3ee0d0" }} />Mastered (70%+)</li>
+                <li><span className={styles.legendSwatch} style={{ background: "#ffcb6b" }} />Shaky</li>
+                <li><span className={styles.legendSwatch} style={{ background: "#f07178" }} />Struggling (&lt;40%)</li>
+                {Object.entries(ERROR_TYPE_STYLE).map(([type, { color, glyph, label }]) => (
+                  <li key={type}>
+                    <span aria-hidden="true" style={{ color }}>{glyph}</span>
+                    {label}
+                  </li>
+                ))}
+              </ul>
+            </>
           ) : (
             <p className={styles.empty}>
               No concepts yet. Start studying to build your graph.
