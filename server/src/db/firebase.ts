@@ -8,8 +8,7 @@ import { getAuth } from "firebase-admin/auth";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-function resolveCredentialPath(pathValue: string | undefined): string | null {
-  if (!pathValue || typeof pathValue !== "string") return null;
+function resolveCredentialPath(pathValue: string): string | null {
   const trimmed = pathValue.trim();
   if (!trimmed) return null;
   return isAbsolute(trimmed) ? trimmed : resolve(process.cwd(), trimmed);

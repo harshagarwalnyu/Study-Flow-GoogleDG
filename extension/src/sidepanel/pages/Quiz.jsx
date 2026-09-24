@@ -210,8 +210,9 @@ export function Quiz() {
     } catch (err) {
       setError(err.message);
     } finally {
+      // No input reset needed: the setup panel (and its file input) unmounts while loading,
+      // so the input remounts empty.
       setLoading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
@@ -249,8 +250,8 @@ export function Quiz() {
     await runQuizGeneration();
   }
 
+  // The Submit button is disabled until an option is selected.
   async function submitAnswer() {
-    if (selected === null) return;
     const q = questions[currentIdx];
 
     // Grade + record answer server-side (client does not receive the answer key).

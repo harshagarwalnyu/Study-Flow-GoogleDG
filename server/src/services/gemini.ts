@@ -9,14 +9,13 @@ export interface SmgData {
 }
 
 interface SmgSectionOptions {
-  label?: string;
+  label: string;
   includeInteractions?: boolean;
-  includeDifficulty?: number | null;
 }
 
 function buildSmgSection(
   smg: SmgData | null | undefined,
-  { label, includeInteractions = false, includeDifficulty = null }: SmgSectionOptions = {},
+  { label, includeInteractions = false }: SmgSectionOptions,
 ) {
   if (!smg) return "";
   const topErrors = Object.entries(smg.errorTypeMap || {})
@@ -25,14 +24,13 @@ function buildSmgSection(
     .map(([k]) => k);
 
   const weak = (smg.weakConcepts || []).slice(0, 5);
-  if (!topErrors.length && !weak.length && !includeDifficulty && !(includeInteractions && smg.recentInteractions?.length)) {
+  if (!topErrors.length && !weak.length && !(includeInteractions && smg.recentInteractions?.length)) {
     return "";
   }
 
-  let section = `--- STUDENT HISTORY (${label || "Overall"}) ---\n`;
+  let section = `--- STUDENT HISTORY (${label}) ---\n`;
   if (topErrors.length) section += `Primary Misconceptions: ${topErrors.join(", ")}\n`;
   if (weak.length) section += `Currently Weak Concepts: ${weak.map((c) => c.replace(/_/g, " ")).join(", ")}\n`;
-  if (includeDifficulty) section += `Recent Difficulty: ${includeDifficulty}/10\n`;
   if (includeInteractions && smg.recentInteractions) {
     section += `Recent Interactions:\n${smg.recentInteractions.slice(-3).map(i => `- Q: ${i.q}\n  A: ${i.a}`).join("\n")}\n`;
   }

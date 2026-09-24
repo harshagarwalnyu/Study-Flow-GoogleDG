@@ -136,10 +136,10 @@ export function formatSummary(s: EvalSummary): string {
   ].join("\n");
 }
 
-if (import.meta.main) {
+/** CLI entry (see cli.ts). Throws on misconfiguration instead of exiting, so it can be tested. */
+export async function main(argv: string[], log: (line: string) => void = console.log): Promise<EvalSummary> {
   if (!env.geminiApiKey) {
-    console.error("GEMINI_API_KEY is not set (server/.env). The eval calls the live embedding API.");
-    process.exit(1);
+    throw new Error("GEMINI_API_KEY is not set (server/.env). The eval calls the live embedding API.");
   }
   const { cases } = JSON.parse(await readFile(path.join(FIXTURES, "retrieval.json"), "utf-8")) as { cases: RetrievalCase[] };
   const { pairs } = JSON.parse(await readFile(path.join(FIXTURES, "concept_pairs.json"), "utf-8")) as { pairs: ConceptPair[] };
@@ -147,8 +147,7 @@ if (import.meta.main) {
   const corpus = await loadCorpus();
   const missing = missingMarkers(corpus, cases);
   if (missing.length) {
-    console.error(`Relevance markers not found in any chunk (fix the fixture):\n  ${missing.join("\n  ")}`);
-    process.exit(1);
+    throw new Error(`Relevance markers not found in any chunk (fix the fixture):\n  ${missing.join("\n  ")}`);
   }
 
   const summary = summarize(
@@ -158,10 +157,11 @@ if (import.meta.main) {
     env.ragMaxCosineDistance,
     env.conceptMatchMaxDistance,
   );
-  console.log(formatSummary(summary));
+  log(formatSummary(summary));
 
-  const jsonAt = process.argv.indexOf("--json");
-  if (jsonAt !== -1 && process.argv[jsonAt + 1]) {
-    await writeFile(process.argv[jsonAt + 1], JSON.stringify(summary, null, 2));
+  const jsonAt = argv.indexOf("--json");
+  if (jsonAt !== -1 && argv[jsonAt + 1]) {
+    await writeFile(argv[jsonAt + 1], JSON.stringify(summary, null, 2));
   }
+  return summary;
 }

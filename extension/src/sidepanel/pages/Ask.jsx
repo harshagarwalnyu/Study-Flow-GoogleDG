@@ -69,7 +69,7 @@ export function Ask() {
   }, [courseId, question]);
 
   async function handleAsk(e) {
-    if (e) e.preventDefault();
+    e.preventDefault();
     if (!question.trim() && !attachedImageBase64) return;
 
     setLoading(true);
@@ -162,8 +162,8 @@ export function Ask() {
     }
   }
 
+  // Only reachable from the "Ingest PDF" button, which renders only when lastIngested.pdfUrl is set.
   async function handleIngestPdf() {
-    if (!lastIngested?.pdfUrl) return;
     setIngestingPdf(true);
     setError(null);
     setFeedback(null);
@@ -305,7 +305,7 @@ export function Ask() {
             onClick={() => {
               setError(null);
               setFeedback(null);
-              if (fileInputRef.current) fileInputRef.current.click();
+              fileInputRef.current.click();
             }}
             disabled={loading || isStreaming}
           >

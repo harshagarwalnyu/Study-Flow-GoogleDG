@@ -10,8 +10,8 @@
     "test:coverage": "vitest run --coverage",
     "start": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
-    "reembed": "bun src/scripts/reembed.ts",
-    "eval": "bun src/eval/run.ts"
+    "reembed": "bun src/scripts/reembed-cli.ts",
+    "eval": "bun src/eval/cli.ts"
   },
   "dependencies": {
     "@axiomhq/js": "^1.6.0",

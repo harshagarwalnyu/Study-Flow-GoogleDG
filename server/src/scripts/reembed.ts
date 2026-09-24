@@ -122,14 +122,16 @@ function parseArgs(argv: string[]): ReembedOptions {
   return opts;
 }
 
-if (import.meta.main) {
+/** CLI entry (see reembed-cli.ts). */
+export async function main(argv: string[], log: (line: string) => void = console.log): Promise<ReembedResult> {
   const { db } = await import("../db/firebase");
-  const opts = parseArgs(process.argv.slice(2));
-  const res = await reembedStaleChunks(db, { ...opts, log: (m) => console.log(m) });
-  console.log(
+  const opts = parseArgs(argv);
+  const res = await reembedStaleChunks(db, { ...opts, log });
+  log(
     `${opts.dryRun ? "[dry run] " : ""}model=${currentEmbeddingModel()} chunks: scanned=${res.scanned} stale=${res.stale} updated=${res.updated}; ` +
     `concepts: scanned=${res.conceptsScanned} updated=${res.conceptsUpdated}`,
   );
+  return res;
 }
 
-export { parseArgs as _parseArgsForTests };
+export { parseArgs, parseArgs as _parseArgsForTests };

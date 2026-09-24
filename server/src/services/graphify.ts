@@ -24,7 +24,7 @@ function budgetChars(maxTokens: number | string): number {
 }
 
 function tokenize(text: string): string[] {
-  const matches = String(text ?? "").toLowerCase().match(/[a-z0-9]+/g);
+  const matches = text.toLowerCase().match(/[a-z0-9]+/g);
   if (!matches) return [];
   return matches.filter((token) => token.length > 2 && !STOP_WORDS.has(token));
 }
@@ -41,8 +41,8 @@ function topTerms(tokens: string[], limit: number = 24): string[] {
 }
 
 function splitUnits(text: string): string[] {
-  const normalized = String(text ?? "").replace(/\r\n/g, "\n").trim();
-  if (!normalized) return [];
+  // Callers pass trimmed, non-empty text, so there is always at least one unit.
+  const normalized = text.replace(/\r\n/g, "\n").trim();
 
   const byDivider = normalized
     .split(/\n+\s*---+\s*\n+/)
@@ -71,8 +71,8 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   for (const token of a) {
     if (b.has(token)) intersection += 1;
   }
-  const union = a.size + b.size - intersection;
-  return union === 0 ? 0 : intersection / union;
+  // Both sets are non-empty here, so the union is too.
+  return intersection / (a.size + b.size - intersection);
 }
 
 interface GraphifyOptions {
@@ -98,7 +98,6 @@ export function graphifyPromptPart(text: string, options: GraphifyOptions = {}):
   if (source.length <= maxChars) return source;
 
   const units = splitUnits(source);
-  if (units.length === 0) return source.slice(0, maxChars).trim();
 
   const anchorTerms = new Set(topTerms(tokenize(options.anchorText ?? "")));
   const nodes = units.map((unit, index) => {
@@ -123,7 +122,7 @@ export function graphifyPromptPart(text: string, options: GraphifyOptions = {}):
   for (const node of nodes) {
     let total = 0;
     for (const token of node.tokenSet) {
-      const degree = termToNodeIndexes.get(token)?.length ?? 0;
+      const degree = termToNodeIndexes.get(token)!.length;
       total += Math.log1p(degree);
     }
     const avg = node.tokenSet.size > 0 ? total / node.tokenSet.size : 0;
@@ -153,7 +152,7 @@ export function graphifyPromptPart(text: string, options: GraphifyOptions = {}):
       const anchorScore = anchorTerms.size > 0
         ? (overlap / anchorTerms.size) * 6 + overlap
         : 0;
-      const centralityScore = (centralityScores.get(node.index) ?? 0) * 1.6;
+      const centralityScore = centralityScores.get(node.index)! * 1.6;
       const earlyPositionBonus = 1 / (1 + node.index);
 
       let redundancyPenalty = 0;
@@ -189,6 +188,6 @@ export function graphifyPromptPart(text: string, options: GraphifyOptions = {}):
     .join("\n\n")
     .trim();
 
-  if (compact.length <= maxChars) return compact;
-  return compact.slice(0, maxChars).trim();
+  // Selection charges each unit plus its "\n\n" separator against maxChars, so this never exceeds it.
+  return compact;
 }

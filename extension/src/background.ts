@@ -94,8 +94,7 @@ chrome.runtime.onMessageExternal.addListener((message: any, sender: chrome.runti
     // Ignore
   }
 
-  const isSafeWebUrl = (url?: string) => {
-    if (!url) return false;
+  const isSafeWebUrl = (url: string) => {
     try {
       return allowedWebOrigins.has(new URL(url).origin);
     } catch {

@@ -37,9 +37,11 @@ import type { ExtensionRuntimeMessage, SupportedContentPlatform } from "./lib/me
     const extractedText = extractText(document, sourcePlatform);
     const pdfInfo = detectPdfUrl(document, sourcePlatform);
 
-    if (!extractedText && !pdfInfo) return false;
+    // Text wins for de-duplication; a PDF-only page is keyed by its URL. Neither: nothing to ingest.
+    const hashSource = extractedText || pdfInfo?.pdfUrl;
+    if (hashSource === undefined) return false;
 
-    const hash = createContentHash(extractedText || (pdfInfo?.pdfUrl ?? ""));
+    const hash = createContentHash(hashSource);
     const isDuplicate = localStorage.getItem(STORAGE_KEY) === hash;
     localStorage.setItem(STORAGE_KEY, hash);
 
@@ -56,8 +58,8 @@ import type { ExtensionRuntimeMessage, SupportedContentPlatform } from "./lib/me
           },
         };
         chrome.runtime.sendMessage(message);
-      } else if (extractedText) {
-        // Text-only path: send extracted DOM text to /ingest/text
+      } else {
+        // Text-only path (hashSource guarantees the text is non-empty here): send extracted DOM text to /ingest/text
         const message: ExtensionRuntimeMessage = {
           type: "INGEST_PAGE",
           payload: createIngestPayload(extractedText, courseId, sourcePlatform),

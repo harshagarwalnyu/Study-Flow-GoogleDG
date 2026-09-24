@@ -184,10 +184,6 @@ export default function Dashboard({
         return;
       }
 
-      if (cyRef.current) {
-        cyRef.current.destroy();
-      }
-
       const elements = nodes.map((node) => ({
         data: {
           id: node.conceptNode,
@@ -243,6 +239,8 @@ export default function Dashboard({
       cancelled = true;
       if (cyRef.current) {
         cyRef.current.destroy();
+        // Cleared so a re-run (new nodes, StrictMode remount) never touches a destroyed instance.
+        cyRef.current = null;
       }
     };
   }, [nodes]);
@@ -253,11 +251,8 @@ export default function Dashboard({
 
     try {
       if (ingestTab === "file") {
-        if (!ingestFile) {
-          throw new Error("Please choose a file to upload.");
-        }
-
-        await uploadIngestFile(ingestFile, ingestCourse);
+        // The Ingest button is disabled until a file is chosen.
+        await uploadIngestFile(ingestFile!, ingestCourse);
       } else {
         await ingestTextContent({
           courseId: ingestCourse,

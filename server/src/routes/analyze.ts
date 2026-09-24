@@ -18,7 +18,7 @@ export const analyzeRouter = Router();
 analyzeRouter.post("/", requireFirebaseAuth, aiLimiter, validate(analyzeSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const uid = req.user!.uid;
-    const { courseId, content, imageBase64 } = req.body ?? {};
+    const { courseId, content, imageBase64 } = req.body;
 
     // Accept text content or base64 image (OCR it first)
     let text = typeof content === "string" ? content.trim() : "";
