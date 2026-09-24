@@ -17,6 +17,6 @@ export default [
     },
   },
   {
-    ignores: ["node_modules/", "uploads/"],
+    ignores: ["node_modules/", "uploads/", "coverage/"],
   },
 ];

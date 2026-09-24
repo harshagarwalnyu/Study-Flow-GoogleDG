@@ -13,10 +13,10 @@ bun run dev:web          # Vite web app on :5173
 bun run dev:extension    # Vite watch build into extension/dist
 bun run dev:all          # all of the above
 bun run check            # lint + typecheck + tests + build, every workspace — run before committing
-bun run --cwd server test:coverage   # vitest; CI gate is 80% on all four metrics
+bun run --cwd <server|web|extension|packages/shared|packages/client> test:coverage   # vitest; CI gate is 100% on all four metrics
 bun run --cwd server eval            # retrieval / concept-merge eval (needs GEMINI_API_KEY)
 bun run --cwd server reembed -- --dry-run   # migrate stored vectors to the current embedding model
-bun run --cwd extension test         # bun:test
+bun run --cwd extension test         # vitest + jsdom (was bun:test; bun coverage ignored unimported files)
 ```
 
 Health check: `curl http://localhost:3000/health`

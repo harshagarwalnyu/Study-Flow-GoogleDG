@@ -45,12 +45,20 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Test server
         run: bun run --cwd server test:coverage
+      - name: Coverage — shared + client packages
+        run: |
+          bun run --cwd packages/shared test:coverage
+          bun run --cwd packages/client test:coverage
+      - name: Coverage — web
+        run: bun run --cwd web test:coverage
+      - name: Coverage — extension
+        run: bun run --cwd extension test:coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@3f20e214133d0983f9a10f3d63b0faf9241a3daa # v6.0.0
         with:
-          files: ./server/coverage/lcov.info
-          flags: server
+          files: ./server/coverage/lcov.info,./web/coverage/lcov.info,./extension/coverage/lcov.info,./packages/shared/coverage/lcov.info,./packages/client/coverage/lcov.info
+          flags: all
           fail_ci_if_error: false
 
   build:
