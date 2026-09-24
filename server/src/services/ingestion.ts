@@ -8,37 +8,8 @@ import path from "node:path";
 import { discoverConcepts } from "./gemini";
 import { initializeConcepts } from "./misconception";
 
-const CHUNK_SIZE = 500;   // characters per chunk
-const CHUNK_OVERLAP = 50; // overlap between adjacent chunks
-
-/**
- * Split text into overlapping chunks of roughly CHUNK_SIZE characters,
- * preferring to break at sentence boundaries.
- *
- * @param {string} text
- * @returns {string[]}
- */
-export function chunkText(text: string): string[] {
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < text.length) {
-    let end = start + CHUNK_SIZE;
-    // Try to break at a sentence boundary
-    if (end < text.length) {
-      const slice = text.slice(start, end + 50);
-      const sentenceEnd = slice.search(/[.!?]\s/);
-      if (sentenceEnd > CHUNK_SIZE * 0.6) {
-        end = start + sentenceEnd + 1;
-      }
-    }
-    chunks.push(text.slice(start, end).trim());
-    // Stop once the tail is emitted; stepping back by the overlap here would emit a
-    // redundant final chunk that is a strict suffix of the previous one.
-    if (end >= text.length) break;
-    start = end - CHUNK_OVERLAP;
-  }
-  return chunks.filter((c) => c.length > 0);
-}
+export { chunkText } from "./chunking";
+import { chunkText } from "./chunking";
 
 const DEFAULT_CAPTURE_NAME = "content-script-capture";
 

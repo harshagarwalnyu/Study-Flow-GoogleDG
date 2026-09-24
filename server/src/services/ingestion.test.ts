@@ -66,6 +66,8 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 const vectorsFor = (n: number) => Array.from({ length: n }, (_, i) => [i / 10]);
+/** Text that chunks into exactly n chunks: one per section. */
+const sections = (n: number) => Array.from({ length: n }, (_, i) => `## Section ${i}\n\nBody ${i}.`).join("\n\n");
 
 describe("ingestion service", () => {
   beforeEach(() => {
@@ -81,27 +83,9 @@ describe("ingestion service", () => {
   });
 
   describe("chunkText", () => {
-    it("returns empty array for empty string", () => {
+    it("is the structure-aware chunker (covered in chunking.test.ts)", () => {
+      expect(chunkText("## H\n\nbody.")).toEqual(["H\nbody."]);
       expect(chunkText("")).toEqual([]);
-    });
-
-    it("splits long text into chunks", () => {
-      expect(chunkText("A".repeat(1200)).length).toBeGreaterThan(1);
-    });
-
-    it("breaks at sentence boundaries", () => {
-      const text = "A".repeat(350) + ". " + "B".repeat(1000);
-      expect(chunkText(text)[0]).toBe("A".repeat(350) + ".");
-    });
-
-    it("does not emit a redundant tail chunk that is a suffix of the previous one", () => {
-      const chunks = chunkText("A".repeat(1100));
-      // 0-500, 450-950, 900-1100 — and nothing after the chunk that reaches the end.
-      expect(chunks.map((c) => c.length)).toEqual([500, 500, 200]);
-    });
-
-    it("emits a single chunk for short text", () => {
-      expect(chunkText("short text.")).toEqual(["short text."]);
     });
   });
 
@@ -121,7 +105,7 @@ describe("ingestion service", () => {
 
   describe("ingestText", () => {
     it("stores one vector per chunk, aligned by index, tagged with model and source", async () => {
-      const n = await ingestText("uid1", "course1", "A".repeat(1100), { filename: "w1.pdf" });
+      const n = await ingestText("uid1", "course1", sections(3), { filename: "w1.pdf" });
 
       expect(n).toBe(3);
       expect(mockEmbedDocuments).toHaveBeenCalledWith(expect.any(Array), "w1.pdf");
@@ -160,7 +144,7 @@ describe("ingestion service", () => {
     });
 
     it("commits in batches under the Firestore write limit", async () => {
-      await ingestText("uid1", "course1", "A".repeat(401 * 450 + 50));
+      await ingestText("uid1", "course1", sections(401));
       expect(mockBatch.commit).toHaveBeenCalledTimes(2);
     });
 
