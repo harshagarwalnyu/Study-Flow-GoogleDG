@@ -97,6 +97,13 @@ describe("apiFetch", () => {
     expect(headers.Authorization).toBeUndefined();
   });
 
+  it("falls back to the local server when VITE_API_URL is empty", async () => {
+    vi.stubEnv("VITE_API_URL", "");
+
+    const { API_URL } = await import("./api");
+    expect(API_URL).toBe("http://localhost:3000");
+  });
+
   it("rejects a non-localhost http:// API URL", async () => {
     vi.stubEnv("VITE_API_URL", "http://example.com");
     vi.stubGlobal("fetch", vi.fn());

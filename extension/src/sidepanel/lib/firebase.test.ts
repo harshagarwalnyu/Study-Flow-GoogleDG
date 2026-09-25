@@ -21,6 +21,14 @@ const FULL_CONFIG_ENV = {
   VITE_FIREBASE_PROJECT_ID: "example-project",
 };
 
+// Explicitly empty rather than unset: the real process env (a dev's .env.local, CI's
+// placeholders) would otherwise leak into the "missing config" cases.
+function stubMissingConfig() {
+  for (const key of Object.keys(FULL_CONFIG_ENV)) {
+    vi.stubEnv(key, "");
+  }
+}
+
 function stubFullConfig() {
   for (const [key, value] of Object.entries(FULL_CONFIG_ENV)) {
     vi.stubEnv(key, value);
@@ -44,6 +52,7 @@ describe("sidepanel firebase config", () => {
   it("warns and leaves auth null when required config is missing, in dev mode", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.stubEnv("DEV", true);
+    stubMissingConfig();
 
     const mod = await import("./firebase");
 
@@ -58,6 +67,7 @@ describe("sidepanel firebase config", () => {
   it("stays silent when config is missing and not in dev mode", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.stubEnv("DEV", false);
+    stubMissingConfig();
 
     const mod = await import("./firebase");
 
