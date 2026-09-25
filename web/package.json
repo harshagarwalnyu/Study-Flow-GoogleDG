@@ -17,7 +17,7 @@
     "@study-flow/shared": "file:../packages/shared",
     "cytoscape": "^3.34.3",
     "firebase": "^12.19.0",
-    "katex": "^0.16.47",
+    "katex": "^0.18.9",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-router-dom": "^7.18.4"

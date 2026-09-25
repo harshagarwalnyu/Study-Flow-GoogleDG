@@ -23,5 +23,8 @@
     "typecheck": "bun run ./scripts/workspace-runner.mjs typecheck",
     "test": "bun run ./scripts/workspace-runner.mjs test",
     "check": "bun run ./scripts/workspace-runner.mjs check"
+  },
+  "overrides": {
+    "katex": "^0.18.9"
   }
 }
