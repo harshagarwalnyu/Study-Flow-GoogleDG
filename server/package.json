@@ -14,7 +14,6 @@
     "eval": "bun src/eval/cli.ts"
   },
   "dependencies": {
-    "@axiomhq/js": "^1.8.0",
     "@google-cloud/vision": "^6.1.0",
     "@google/genai": "^2.24.0",
     "@study-flow/shared": "workspace:*",
@@ -33,9 +32,9 @@
     "@eslint/js": "^10.0.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/multer": "^1.4.13",
-    "@types/node": "^22.20.4",
-    "@types/supertest": "^6.0.3",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^24.13.6",
+    "@types/supertest": "^7.2.1",
     "@typescript/native": "npm:typescript@^7.0.2",
     "@vitest/coverage-v8": "^5.0.1",
     "eslint": "^10.11.0",
