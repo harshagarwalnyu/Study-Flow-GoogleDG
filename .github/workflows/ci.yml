@@ -27,7 +27,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.11
-          cache: "bun"
       - run: bun install --frozen-lockfile
       - name: Lint
         run: bun run lint
@@ -41,7 +40,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.11
-          cache: "bun"
       - run: bun install --frozen-lockfile
       - name: Test server
         run: bun run --cwd server test:coverage
@@ -57,6 +55,16 @@ jobs:
     name: ci-build-web-extension
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Job-level so compressed-size-action's own rebuild gets the same placeholders; the extension
+    # build refuses to run without Firebase config.
+    env:
+      VITE_API_URL: http://localhost:3000
+      VITE_FIREBASE_API_KEY: ci-placeholder
+      VITE_FIREBASE_AUTH_DOMAIN: ci-placeholder.firebaseapp.com
+      VITE_FIREBASE_PROJECT_ID: ci-placeholder
+      VITE_FIREBASE_STORAGE_BUCKET: ci-placeholder.appspot.com
+      VITE_FIREBASE_MESSAGING_SENDER_ID: "000000000000"
+      VITE_FIREBASE_APP_ID: 1:000000000000:web:ci-placeholder
     permissions:
       contents: read
       pull-requests: write
@@ -65,18 +73,9 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.11
-          cache: "bun"
       - run: bun install --frozen-lockfile
       - name: Build web and extension
         run: bun run build
-        env:
-          VITE_API_URL: http://localhost:3000
-          VITE_FIREBASE_API_KEY: ci-placeholder
-          VITE_FIREBASE_AUTH_DOMAIN: ci-placeholder.firebaseapp.com
-          VITE_FIREBASE_PROJECT_ID: ci-placeholder
-          VITE_FIREBASE_STORAGE_BUCKET: ci-placeholder.appspot.com
-          VITE_FIREBASE_MESSAGING_SENDER_ID: "000000000000"
-          VITE_FIREBASE_APP_ID: 1:000000000000:web:ci-placeholder
 
       - name: Report compressed bundle sizes
         uses: preactjs/compressed-size-action@66325aad6443cb7cf89c4bfcd414aea2367cda94 # v2.9.1
@@ -106,7 +105,6 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.11
-          cache: "bun"
       - run: bun install --frozen-lockfile
       - name: Audit dependencies
         run: bun audit
