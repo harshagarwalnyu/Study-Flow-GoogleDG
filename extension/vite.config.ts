@@ -1,7 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -40,40 +40,73 @@ function katexWoff2Only(): Plugin {
   };
 }
 
-export default defineConfig(({ mode }) => ({
-  base: "./",
-  plugins: [react(), katexWoff2Only(), stripCrossOrigin()],
-  resolve: {
-    alias: {
-      "@study-flow/client": resolve(__dirname, "../packages/client/src/index.ts"),
-      "@study-flow/shared": resolve(__dirname, "../packages/shared/src/index.ts"),
-    },
-  },
-  build: {
-    outDir: "dist",
-    emptyOutDir: true,
-    minify: mode === "production",
-    sourcemap: mode !== "production",
-    rollupOptions: {
-      input: {
-        sidepanel: resolve(__dirname, "sidepanel.html"),
-        background: resolve(__dirname, "src/background.ts"),
-        content: resolve(__dirname, "src/content.ts"),
-      },
-      output: {
-        entryFileNames: "[name].js",
-        chunkFileNames:
-          mode === "production" ? "chunks/[name]-[hash].js" : "chunks/[name].js",
-        assetFileNames:
-          mode === "production" ? "assets/[name]-[hash][extname]" : "assets/[name][extname]",
-        manualChunks(id) {
-          if (id.includes("node_modules/katex")) {
-            return "katex";
-          }
+// Firebase config is inlined at build time, so a release built without it loads fine and
+// only fails when a student tries to sign in. Fail the build instead.
+const REQUIRED_FIREBASE_ENV = [
+  "VITE_FIREBASE_API_KEY",
+  "VITE_FIREBASE_AUTH_DOMAIN",
+  "VITE_FIREBASE_PROJECT_ID",
+] as const;
 
-          return undefined;
+export function assertFirebaseEnv(env: Record<string, string>): void {
+  const missing = REQUIRED_FIREBASE_ENV.filter((key) => !env[key]?.trim());
+  if (missing.length > 0) {
+    throw new Error(
+      `Extension production build is missing ${missing.join(", ")}. Copy extension/.env.example to extension/.env.local and fill it in.`,
+    );
+  }
+}
+
+export default defineConfig(({ command, mode }) => {
+  if (command === "build" && mode === "production") {
+    // loadEnv also merges VITE_* variables from process.env, which is how CI passes them.
+    assertFirebaseEnv(loadEnv(mode, __dirname, "VITE_"));
+  }
+  return {
+    base: "./",
+    plugins: [react(), katexWoff2Only(), stripCrossOrigin()],
+    resolve: {
+      alias: {
+        "@study-flow/client": resolve(
+          __dirname,
+          "../packages/client/src/index.ts",
+        ),
+        "@study-flow/shared": resolve(
+          __dirname,
+          "../packages/shared/src/index.ts",
+        ),
+      },
+    },
+    build: {
+      outDir: "dist",
+      emptyOutDir: true,
+      minify: mode === "production",
+      sourcemap: mode !== "production",
+      rollupOptions: {
+        input: {
+          sidepanel: resolve(__dirname, "sidepanel.html"),
+          background: resolve(__dirname, "src/background.ts"),
+          content: resolve(__dirname, "src/content.ts"),
+        },
+        output: {
+          entryFileNames: "[name].js",
+          chunkFileNames:
+            mode === "production"
+              ? "chunks/[name]-[hash].js"
+              : "chunks/[name].js",
+          assetFileNames:
+            mode === "production"
+              ? "assets/[name]-[hash][extname]"
+              : "assets/[name][extname]",
+          manualChunks(id) {
+            if (id.includes("node_modules/katex")) {
+              return "katex";
+            }
+
+            return undefined;
+          },
         },
       },
     },
-  },
-}));
+  };
+});
